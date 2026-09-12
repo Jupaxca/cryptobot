@@ -1,0 +1,30 @@
+name: Bot DCA Crypto Diario (Telegram)
+
+on:
+  schedule:
+    - cron: '0 8 * * *' # Se ejecuta todos los días a las 8:00 AM UTC
+  workflow_dispatch: # Permite ejecutarlo manualmente desde la web cuando quieras
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout al repositorio
+        uses: actions/checkout@v3
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install ccxt pandas numpy requests
+
+      - name: Ejecutar el bot de DCA
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python bot_dca.py
