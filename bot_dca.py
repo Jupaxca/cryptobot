@@ -7,64 +7,27 @@ import requests
 from datetime import datetime, timezone
 
 # ==========================================================================
-# 1. CONFIGURACIÓN
+# 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO
 # ==========================================================================
-# --- Núcleo conservador: los más establecidos y líquidos, timeframe diario ---
+# --- Núcleo Conservador: Base del portafolio (Baja volatilidad relativa) ---
 NUCLEO_CONSERVADOR = ['BTC/USD', 'ETH/USD']
 TEMPORALIDAD_NUCLEO = '1d'
 
-# --- Nivel intermedio: mismo horizonte (diario) pero activos más volátiles,
-#     por eso usa umbrales algo más anchos (más margen antes de reaccionar) ---
-NIVEL_INTERMEDIO = ['SOL/USD']
-TEMPORALIDAD_INTERMEDIO = '1d'
+# --- Nivel Crecimiento y Alto Potencial: Proyectos de alta utilidad pero mayor volatilidad ---
+# Para mantener a mediano/largo plazo con etiqueta de PRECAUCIÓN
+NIVEL_CRECIMIENTO = ['SOL/USD', 'LINK/USD', 'AVAX/USD']
+TEMPORALIDAD_CRECIMIENTO = '1d'
 
-# --- Satélite de alto riesgo: corto plazo, recalibrado a 4h.
-#     Valores elegidos según convención documentada por la industria/bibliografía
-#     (ver justificación de cada uno abajo). Siguen siendo un PUNTO DE PARTIDA
-#     razonado, no una garantía — la única prueba real es tu propio walk-forward
-#     con datos históricos de 4h. ---
+# --- Satélite de Alto Riesgo (5%): Swing trading dinámico en 4h ---
 TEMPORALIDAD_SATELITE = '4h'
-
-# RSI de entrada: Wilder (1978) documenta 30 como sobreventa estándar, pero
-# múltiples guías de trading cripto (ej. Binance Academy, Babypips) recomiendan
-# bajar a 20-25 en activos de alta volatilidad como altcoins, porque el RSI
-# estándar de 30 dispara con demasiada frecuencia y genera muchos falsos
-# positivos ("ruido") en activos que oscilan tan fuerte. Para el satélite
-# (altcoins, el bloque de mayor riesgo) uso 25: más selectivo que el estándar,
-# menos extremo que 20.
 SATELITE_RSI_ENTRADA = 25
-
-# ADX máximo (filtro de régimen): Wilder define <20 como "ausencia de
-# tendencia" (rango puro) y 20-25 como zona ambigua. Para el bloque de mayor
-# riesgo conviene la definición más estricta (20), no la más permisiva (25),
-# precisamente porque aquí es donde más cuesta un falso positivo (comprar una
-# caída que en realidad es tendencia bajista, no rango).
 SATELITE_ADX_MAX = 20
-
-# Multiplicador ATR del Stop Loss: Van Tharp documenta 1.5x-3x como rango
-# profesional. 2.0x es el punto medio y el valor por defecto más citado en
-# frameworks de trading algorítmico (ej. backtesting.py, Freqtrade usan 2x
-# ATR como default sugerido para stops en timeframes intradía/4h).
 SATELITE_ATR_SL_MULT = 2.0
-
-# Take Profit: se fija en 4x ATR para lograr un ratio riesgo:beneficio de 2:1.
-# Esto no es arbitrario — es uno de los principios más repetidos en la
-# literatura de gestión de riesgo (Van Tharp, Alexander Elder en "Trading for
-# a Living"): con R:R de 2:1, el sistema puede ser rentable incluso con win
-# rate tan bajo como ~35-40%, lo cual da más margen de error que un R:R de
-# 1.5:1 (que necesita win rate más alto para ser rentable).
 SATELITE_ATR_TP_MULT = 4.0
-
-# Filtro de tendencia mayor: EMA de 200 periodos es, con diferencia, el nivel
-# más citado y más vigilado en trading de cripto específicamente (a diferencia
-# del Golden Cross SMA50/200, que es más una convención de acciones/forex).
-# Al ser un nivel que gran parte del mercado observa, tiene más probabilidad
-# de actuar como soporte/resistencia autocumplida en cripto.
-SATELITE_FILTRO_TENDENCIA = 'ema200'
 
 VELAS_ANALISIS = 300
 VELAS_ESCUDO_BTC = 80
-TEMPORALIDAD_ESCUDO = '1d'             # el escudo macro siempre es diario, independiente de lo demás
+TEMPORALIDAD_ESCUDO = '1d'
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
@@ -78,10 +41,7 @@ HORIZONTE_VALIDACION = 14
 
 
 # ==========================================================================
-# 2. DESCARGA DE VELAS — SIEMPRE DESCARTA LA VELA EN FORMACIÓN
-#    Esto es lo que permite correr el bot cada hora sin repintado: sin
-#    importar cuántas veces al día lo ejecutes, el análisis diario siempre
-#    usa la última vela DIARIA ya cerrada, nunca la que sigue actualizándose.
+# 2. DESCARGA DE VELAS CERRADAS (Evita repintado)
 # ==========================================================================
 def descargar_velas_cerradas(exchange, simbolo, temporalidad, limit):
     tf_ms = exchange.parse_timeframe(temporalidad) * 1000
@@ -91,12 +51,12 @@ def descargar_velas_cerradas(exchange, simbolo, temporalidad, limit):
     ahora = exchange.milliseconds()
     ultima_vela_ts = velas[-1][0]
     if ultima_vela_ts + tf_ms > ahora:
-        velas = velas[:-1]   # descarta la vela todavía en formación
+        velas = velas[:-1]   # Descarta la vela en formación
     return velas[-limit:] if len(velas) > limit else velas
 
 
 # ==========================================================================
-# 3. INDICADORES
+# 3. INDICADORES TÉCNICOS
 # ==========================================================================
 def calcular_rsi(series, period=14):
     delta = series.diff()
@@ -136,7 +96,7 @@ def calcular_adx(df, period=14):
 
 
 # ==========================================================================
-# 4. VALIDACIÓN HISTÓRICA DE UNA SEÑAL
+# 4. VALIDACIÓN HISTÓRICA DE SEÑALES
 # ==========================================================================
 def validar_senal_historica(df, condicion_activa, horizonte=HORIZONTE_VALIDACION):
     disparos = np.where(condicion_activa)[0]
@@ -165,7 +125,7 @@ def es_mercado_spot_valido(exchange, simbolo):
 
 
 # ==========================================================================
-# 5. TELEGRAM Y ESTADO
+# 5. TELEGRAM Y GESTIÓN DE ESTADO
 # ==========================================================================
 def enviar_alerta_telegram(mensaje):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -197,11 +157,9 @@ def guardar_estado(estado):
 
 
 # ==========================================================================
-# 6. ANÁLISIS DE UN ACTIVO DE "MEDIANO/LARGO PLAZO" (núcleo o intermedio)
-#    Misma lógica, umbrales configurables por nivel para reflejar distinta
-#    volatilidad esperada (SOL necesita más margen que BTC/ETH).
+# 6. ANÁLISIS DE ACTIVOS A MEDIANO/LARGO PLAZO (NÚCLEO Y CRECIMIENTO)
 # ==========================================================================
-def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, rsi_compra, rsi_venta, sobreprecio_pct):
+def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, rsi_compra, rsi_venta, sobreprecio_pct, es_crecimiento=False):
     velas = descargar_velas_cerradas(exchange, simbolo, temporalidad, VELAS_ANALISIS)
     if not velas or len(velas) < 60:
         return None
@@ -222,21 +180,24 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
     condicion_descuento = (df['cierre'] <= df['Media_30'] * (1 - descuento_pct)) | (df['RSI'] < rsi_compra)
     condicion_sobrecompra = df['RSI'] >= rsi_venta
 
+    # Construcción de la etiqueta con advertencia de PRECAUCIÓN si es de Crecimiento
+    prefijo_precaucion = "⚠️ *PRECAUCIÓN (Alta Volatilidad):* " if es_crecimiento else ""
+
     if precio <= (media_30 * (1 - descuento_pct)) or rsi < rsi_compra:
         accion = "COMPRAR"
-        etiqueta = "🟢 *COMPRAR* (activo en descuento por corrección)"
+        etiqueta = f"{prefijo_precaucion}🟢 *COMPRAR* (activo en descuento por corrección)"
         validacion = validar_senal_historica(df, condicion_descuento.values)
     elif rsi >= rsi_venta:
         accion = "EVALUAR_VENTA"
-        etiqueta = "🟡 *EVALUAR TOMA DE BENEFICIOS* (sobrecalentamiento)"
+        etiqueta = f"{prefijo_precaucion}🟡 *EVALUAR TOMA DE BENEFICIOS* (sobrecalentamiento)"
         validacion = validar_senal_historica(df, condicion_sobrecompra.values)
     elif precio > (media_30 * (1 + sobreprecio_pct)):
         accion = "ESPERAR"
-        etiqueta = "🔴 *ESPERAR* (precio por encima del promedio, mantén liquidez)"
+        etiqueta = f"{prefijo_precaucion}🔴 *ESPERAR* (precio por encima del promedio, mantén liquidez)"
         validacion = None
     else:
         accion = "NEUTRO"
-        etiqueta = "⚪ *ZONA NEUTRA*"
+        etiqueta = f"{prefijo_precaucion}⚪ *ZONA NEUTRA*"
         validacion = None
 
     distancia_atr = atr * 2.5
@@ -250,21 +211,21 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
 
 
 # ==========================================================================
-# 7. BOT MAESTRO
+# 7. EJECUCIÓN PRINCIPAL DEL BOT MAESTRO
 # ==========================================================================
 def ejecutar_bot_maestro():
     exchange = ccxt.kraken()
     exchange.load_markets()
 
     print("="*70)
-    print(" ESCÁNER CUANTITATIVO MAESTRO (NÚCLEO / INTERMEDIO / SATÉLITE)")
+    print(" ESCÁNER CUANTITATIVO MAESTRO (NÚCLEO / CRECIMIENTO / SATÉLITE)")
     print("="*70)
 
     estado_anterior = cargar_estado()
     estado_nuevo = {}
-    alertas_nucleo, alertas_intermedio, alertas_satelite = [], [], []
+    alertas_nucleo, alertas_crecimiento, alertas_satelite = [], [], []
 
-    # --- ESCUDO MACRO (siempre diario, fail-safe) ---
+    # --- ESCUDO MACRO (BTC Diario) ---
     print("\n🛡️ Verificando Escudo Macro (BTC, diario)...")
     btc_saludable = False
     escudo_verificado = False
@@ -277,7 +238,7 @@ def ejecutar_bot_maestro():
             sma_50_btc = df_btc.iloc[-1]['SMA_50']
             btc_saludable = precio_btc >= sma_50_btc
             escudo_verificado = True
-            print(f"  BTC {'✅ saludable' if btc_saludable else '⚠️ débil'}: {precio_btc:.2f} vs SMA50 {sma_50_btc:.2f}")
+            print(f"  BTC {'✅ saludable' if btc_saludable else '⚠️ débil'}: ${precio_btc:,.2f} vs SMA50 ${sma_50_btc:,.2f}")
     except Exception as e:
         print(f"⚠️ Error al verificar el escudo macro: {e}")
 
@@ -285,13 +246,14 @@ def ejecutar_bot_maestro():
         btc_saludable = False
         print("  -> No verificable: satélites bloqueados por seguridad.")
 
-    # --- NÚCLEO CONSERVADOR (BTC/ETH, diario, umbrales estándar) ---
+    # --- NÚCLEO CONSERVADOR (BTC/ETH, diario) ---
     print("\n🛡️ Analizando Núcleo Conservador (BTC/ETH)...")
     for simbolo in NUCLEO_CONSERVADOR:
         try:
             r = analizar_activo_largo_plazo(
                 exchange, simbolo, TEMPORALIDAD_NUCLEO,
-                descuento_pct=0.04, rsi_compra=40, rsi_venta=75, sobreprecio_pct=0.05
+                descuento_pct=0.04, rsi_compra=40, rsi_venta=75, sobreprecio_pct=0.05,
+                es_crecimiento=False
             )
             if r:
                 alertas_nucleo.append(r)
@@ -299,26 +261,27 @@ def ejecutar_bot_maestro():
         except Exception as e:
             print(f"⚠️ Error en Núcleo {simbolo}: {e}")
 
-    # --- NIVEL INTERMEDIO (SOL, diario, umbrales más anchos por su volatilidad) ---
-    print("\n🟠 Analizando Nivel Intermedio (SOL)...")
-    for simbolo in NIVEL_INTERMEDIO:
+    # --- NIVEL CRECIMIENTO Y ALTO POTENCIAL (SOL, LINK, AVAX, diario con PRECAUCIÓN) ---
+    print("\n🚀 Analizando Nivel Crecimiento y Alto Potencial (SOL/LINK/AVAX)...")
+    for simbolo in NIVEL_CRECIMIENTO:
         try:
             r = analizar_activo_largo_plazo(
-                exchange, simbolo, TEMPORALIDAD_INTERMEDIO,
-                descuento_pct=0.07, rsi_compra=35, rsi_venta=80, sobreprecio_pct=0.08
+                exchange, simbolo, TEMPORALIDAD_CRECIMIENTO,
+                descuento_pct=0.07, rsi_compra=35, rsi_venta=80, sobreprecio_pct=0.08,
+                es_crecimiento=True
             )
             if r:
-                alertas_intermedio.append(r)
+                alertas_crecimiento.append(r)
                 estado_nuevo[simbolo] = r['accion']
         except Exception as e:
-            print(f"⚠️ Error en Intermedio {simbolo}: {e}")
+            print(f"⚠️ Error en Crecimiento {simbolo}: {e}")
 
-    # --- SATÉLITE (4h, dinámico, filtro ADX de régimen) ---
+    # --- SATÉLITE DE ALTO RIESGO (4h, filtro ADX de régimen) ---
     if btc_saludable:
-        print(f"\n🚀 Analizando Satélite ({TEMPORALIDAD_SATELITE}, con filtro de régimen ADX)...")
+        print(f"\n⚡ Analizando Satélite de Corto Plazo ({TEMPORALIDAD_SATELITE})...")
         try:
             tickers = exchange.fetch_tickers()
-            excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_INTERMEDIO)
+            excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_CRECIMIENTO)
             candidatas = []
             for s, ticker in tickers.items():
                 if '/USD' not in s or s in excluidos or 'USDT' in s or 'USDC' in s:
@@ -379,7 +342,7 @@ def ejecutar_bot_maestro():
     else:
         print("\n🚫 Satélites bloqueados (escudo macro no saludable o no verificable).")
 
-    # --- REPORTE ---
+    # --- REPORTE Y FILTRADO DE ALERTAS ---
     def hubo_cambio(simbolo, accion):
         return estado_anterior.get(simbolo) != accion
 
@@ -387,7 +350,7 @@ def ejecutar_bot_maestro():
         return [a for a in lista if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], a.get('accion', clave_estado))]
 
     nucleo_enviar = filtrar(alertas_nucleo, None)
-    intermedio_enviar = filtrar(alertas_intermedio, None)
+    crecimiento_enviar = filtrar(alertas_crecimiento, None)
     satelite_enviar = [a for a in alertas_satelite if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], 'SATELITE_ENTRADA')]
 
     def bloque_texto(titulo, lista, es_satelite=False):
@@ -408,17 +371,17 @@ def ejecutar_bot_maestro():
             texto += "\n"
         return texto
 
-    if nucleo_enviar or intermedio_enviar or satelite_enviar:
+    if nucleo_enviar or crecimiento_enviar or satelite_enviar:
         ahora = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         mensaje = f"🚨 *REPORTE CUANTITATIVO* — {ahora}\n\n"
         if nucleo_enviar:
             mensaje += bloque_texto("🛡️ *NÚCLEO CONSERVADOR (BTC/ETH)*", nucleo_enviar)
-        if intermedio_enviar:
-            mensaje += bloque_texto("🟠 *NIVEL INTERMEDIO (SOL)*", intermedio_enviar)
+        if crecimiento_enviar:
+            mensaje += bloque_texto("🚀 *CRECIMIENTO Y ALTO POTENCIAL (SOL/LINK/AVAX)*", crecimiento_enviar)
         if satelite_enviar:
-            mensaje += bloque_texto("🚀 *SATÉLITE (alto riesgo, 4h)*", satelite_enviar, es_satelite=True)
-        mensaje += ("_Herramienta de apoyo con validación histórica limitada. "
-                    "No es asesoría financiera personalizada._")
+            mensaje += bloque_texto("⚡ *SATÉLITE (Alto riesgo / Swing 4h)*", satelite_enviar, es_satelite=True)
+        mensaje += ("_Herramienta de apoyo con validación histórica. "
+                    "No constituye asesoría financiera._")
         enviar_alerta_telegram(mensaje)
     else:
         print("\nℹ️ Sin cambios de estado respecto a la última corrida.")
