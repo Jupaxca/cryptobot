@@ -1,512 +1,430 @@
 import ccxt
 import pandas as pd
 import numpy as np
-import itertools
-import time
+import os
+import json
+import requests
+from datetime import datetime, timezone
 
 # ==========================================================================
-# 1. CONFIGURACIÓN GLOBAL (Reversión a la Media - RSI + Filtro de Régimen)
+# 1. CONFIGURACIÓN
 # ==========================================================================
-SIMBOLOS = ['UNI/USD', 'ETH/USD', 'LINK/USD', 'SOL/USD', 'BTC/USD']
-TEMPORALIDAD = '4h'
-CAPITAL_INICIAL = 370000
-COMISION = 0.0025
-SLIPPAGE = 0.0010
+# --- Núcleo conservador: los más establecidos y líquidos, timeframe diario ---
+NUCLEO_CONSERVADOR = ['BTC/USD', 'ETH/USD']
+TEMPORALIDAD_NUCLEO = '1d'
+
+# --- Nivel intermedio: mismo horizonte (diario) pero activos más volátiles,
+#     por eso usa umbrales algo más anchos (más margen antes de reaccionar) ---
+NIVEL_INTERMEDIO = ['SOL/USD']
+TEMPORALIDAD_INTERMEDIO = '1d'
+
+# --- Satélite de alto riesgo: corto plazo, recalibrado a 4h.
+#     Valores elegidos según convención documentada por la industria/bibliografía
+#     (ver justificación de cada uno abajo). Siguen siendo un PUNTO DE PARTIDA
+#     razonado, no una garantía — la única prueba real es tu propio walk-forward
+#     con datos históricos de 4h. ---
+TEMPORALIDAD_SATELITE = '4h'
+
+# RSI de entrada: Wilder (1978) documenta 30 como sobreventa estándar, pero
+# múltiples guías de trading cripto (ej. Binance Academy, Babypips) recomiendan
+# bajar a 20-25 en activos de alta volatilidad como altcoins, porque el RSI
+# estándar de 30 dispara con demasiada frecuencia y genera muchos falsos
+# positivos ("ruido") en activos que oscilan tan fuerte. Para el satélite
+# (altcoins, el bloque de mayor riesgo) uso 25: más selectivo que el estándar,
+# menos extremo que 20.
+SATELITE_RSI_ENTRADA = 25
+
+# ADX máximo (filtro de régimen): Wilder define <20 como "ausencia de
+# tendencia" (rango puro) y 20-25 como zona ambigua. Para el bloque de mayor
+# riesgo conviene la definición más estricta (20), no la más permisiva (25),
+# precisamente porque aquí es donde más cuesta un falso positivo (comprar una
+# caída que en realidad es tendencia bajista, no rango).
+SATELITE_ADX_MAX = 20
+
+# Multiplicador ATR del Stop Loss: Van Tharp documenta 1.5x-3x como rango
+# profesional. 2.0x es el punto medio y el valor por defecto más citado en
+# frameworks de trading algorítmico (ej. backtesting.py, Freqtrade usan 2x
+# ATR como default sugerido para stops en timeframes intradía/4h).
+SATELITE_ATR_SL_MULT = 2.0
+
+# Take Profit: se fija en 4x ATR para lograr un ratio riesgo:beneficio de 2:1.
+# Esto no es arbitrario — es uno de los principios más repetidos en la
+# literatura de gestión de riesgo (Van Tharp, Alexander Elder en "Trading for
+# a Living"): con R:R de 2:1, el sistema puede ser rentable incluso con win
+# rate tan bajo como ~35-40%, lo cual da más margen de error que un R:R de
+# 1.5:1 (que necesita win rate más alto para ser rentable).
+SATELITE_ATR_TP_MULT = 4.0
+
+# Filtro de tendencia mayor: EMA de 200 periodos es, con diferencia, el nivel
+# más citado y más vigilado en trading de cripto específicamente (a diferencia
+# del Golden Cross SMA50/200, que es más una convención de acciones/forex).
+# Al ser un nivel que gran parte del mercado observa, tiene más probabilidad
+# de actuar como soporte/resistencia autocumplida en cripto.
+SATELITE_FILTRO_TENDENCIA = 'ema200'
+
+VELAS_ANALISIS = 300
+VELAS_ESCUDO_BTC = 80
+TEMPORALIDAD_ESCUDO = '1d'             # el escudo macro siempre es diario, independiente de lo demás
+
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+
+ESTADO_PATH = 'bot_estado.json'
+SOLO_ALERTAR_CAMBIOS = True
+
+CAPITAL_REFERENCIA = 370000
 RIESGO_POR_TRADE = 0.01
-
-# 4h con 3000 velas = ~500 días. Para cobertura comparable al análisis diario
-# (~8 años) hace falta bastante más historial. 12000 velas de 4h = ~2000 días
-# (~5.5 años). Ajusta según la paciencia con el rate limit de Kraken:
-# ~12 llamadas de 1000 velas por activo, con pausa entre cada una.
-MAX_VELAS = 12000
-
-# Grid de parámetros a optimizar. Se mezclan tus valores originales con los
-# valores "de manual" (documentados en la bibliografía clásica de análisis
-# técnico) para que el walk-forward compita ambos conjuntos y elija por
-# evidencia out-of-sample, no por autoridad del libro:
-#   - RSI: Wilder (1978) usa 30/70 como estándar; 20/80 es la variante más
-#     citada para mercados con tendencias fuertes (aplicable a cripto).
-#   - ADX: Wilder también define 25 como "tendencia confirmada" y ~20 como
-#     "sin tendencia clara" (régimen de rango).
-#   - Multiplicador ATR del stop: Van Tharp documenta un rango de 1.5x-3.0x
-#     como uso profesional estándar; se cubre el rango completo.
-PARAMS_RSI_COMPRA = [20, 25, 30, 35]   # 20 y 30 = valores de manual; 25 y 35 = tus originales
-PARAMS_ATR = [1.5, 2.0, 2.5, 3.0]      # rango completo documentado por Van Tharp
-PARAMS_ADX_MAX = [20, 25, 30]          # 20 y 25 = valores de manual (Wilder); 30 = tu original
-
-# Filtro de tendencia mayor. Se ofrecen dos variantes en el grid:
-#   - 'ema200'       : precio por encima de la EMA de 200 (tu versión original)
-#   - 'golden_cross'  : SMA_50 por encima de SMA_200 (convención estándar de
-#                        análisis técnico, señal de régimen alcista de largo plazo)
-PARAMS_FILTRO_TENDENCIA = ['ema200', 'golden_cross']
-EMA_FILTRO_TENDENCIA = 200
-SMA_CORTA_GOLDEN_CROSS = 50
-SMA_LARGA_GOLDEN_CROSS = 200
-
-N_FOLDS_WALK_FORWARD = 4
-MIN_TRADES_CONFIABLE = 20
-N_ITER_BOOTSTRAP = 2000
+HORIZONTE_VALIDACION = 14
 
 
 # ==========================================================================
-# 2. DESCARGA DE DATOS
+# 2. DESCARGA DE VELAS — SIEMPRE DESCARTA LA VELA EN FORMACIÓN
+#    Esto es lo que permite correr el bot cada hora sin repintado: sin
+#    importar cuántas veces al día lo ejecutes, el análisis diario siempre
+#    usa la última vela DIARIA ya cerrada, nunca la que sigue actualizándose.
 # ==========================================================================
-def descargar_historial_completo(exchange, simbolo, temporalidad, max_velas=3000):
+def descargar_velas_cerradas(exchange, simbolo, temporalidad, limit):
     tf_ms = exchange.parse_timeframe(temporalidad) * 1000
+    velas = exchange.fetch_ohlcv(simbolo, timeframe=temporalidad, limit=limit + 1)
+    if not velas:
+        return velas
     ahora = exchange.milliseconds()
-    since = ahora - max_velas * tf_ms
-
-    todas_las_velas = []
-    while True:
-        try:
-            velas = exchange.fetch_ohlcv(simbolo, timeframe=temporalidad, since=since, limit=1000)
-            if not velas:
-                break
-            todas_las_velas += velas
-            ultimo_ts = velas[-1][0]
-            nuevo_since = ultimo_ts + tf_ms
-            if nuevo_since <= since or nuevo_since >= ahora:
-                break
-            since = nuevo_since
-            if len(todas_las_velas) >= max_velas:
-                break
-            time.sleep(exchange.rateLimit / 1000)
-        except Exception:
-            break
-
-    if not todas_las_velas:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(todas_las_velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
-    df = df.drop_duplicates(subset='timestamp').sort_values('timestamp').reset_index(drop=True)
-    return df
+    ultima_vela_ts = velas[-1][0]
+    if ultima_vela_ts + tf_ms > ahora:
+        velas = velas[:-1]   # descarta la vela todavía en formación
+    return velas[-limit:] if len(velas) > limit else velas
 
 
 # ==========================================================================
-# 3. INDICADORES: RSI, ATR, ADX (filtro de régimen) y EMA de tendencia
+# 3. INDICADORES
 # ==========================================================================
-def calcular_indicadores(df):
-    df = df.copy()
-
-    # --- RSI ---
-    delta = df['cierre'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+def calcular_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.replace([np.inf, -np.inf], 100)
 
-    # --- ATR (gestión de riesgo) ---
+
+def calcular_bollinger_bands(series, period=20, std_dev=2):
+    middle = series.rolling(window=period).mean()
+    std = series.rolling(window=period).std()
+    return middle + (std * std_dev), middle, middle - (std * std_dev)
+
+
+def calcular_atr(df, period=14):
     tr0 = df['maximo'] - df['minimo']
     tr1 = (df['maximo'] - df['cierre'].shift(1)).abs()
     tr2 = (df['minimo'] - df['cierre'].shift(1)).abs()
-    df['TR'] = pd.concat([tr0, tr1, tr2], axis=1).max(axis=1)
-    df['ATR'] = df['TR'].rolling(window=14).mean()
+    tr = pd.concat([tr0, tr1, tr2], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
 
-    # --- ADX (filtro de régimen: bajo = mercado en rango, favorable para reversión) ---
+
+def calcular_adx(df, period=14):
     up_move = df['maximo'] - df['maximo'].shift(1)
     down_move = df['minimo'].shift(1) - df['minimo']
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_di = 100 * (pd.Series(plus_dm, index=df.index).rolling(14).mean() / df['ATR'])
-    minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(14).mean() / df['ATR'])
+    atr = calcular_atr(df, period)
+    plus_di = 100 * (pd.Series(plus_dm, index=df.index).rolling(period).mean() / atr)
+    minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(period).mean() / atr)
     suma_di = plus_di + minus_di
     dx = 100 * (plus_di - minus_di).abs() / suma_di
     dx = dx.replace([np.inf, -np.inf], np.nan)
-    df['ADX'] = dx.rolling(14).mean()
-
-    # --- EMA de tendencia mayor (filtro: evitar comprar dentro de un bear market) ---
-    df['EMA_TENDENCIA'] = df['cierre'].ewm(span=EMA_FILTRO_TENDENCIA, adjust=False).mean()
-
-    # --- Golden Cross: SMA corta vs SMA larga, filtro de tendencia alternativo ---
-    df['SMA_CORTA'] = df['cierre'].rolling(window=SMA_CORTA_GOLDEN_CROSS).mean()
-    df['SMA_LARGA'] = df['cierre'].rolling(window=SMA_LARGA_GOLDEN_CROSS).mean()
-
-    return df.dropna().reset_index(drop=True)
+    return dx.rolling(period).mean()
 
 
 # ==========================================================================
-# 4. BACKTEST (con filtro de régimen ADX + filtro de tendencia EMA)
+# 4. VALIDACIÓN HISTÓRICA DE UNA SEÑAL
 # ==========================================================================
-def backtest(df, atr_mult, rsi_compra_thresh, adx_max_thresh, filtro_tendencia, capital_inicial, riesgo_por_trade):
-    efectivo = capital_inicial
-    en_posicion = False
-    precio_entrada = stop_loss = cantidad = 0.0
-    trades_pnl = []
-    equity_curve = [capital_inicial]
+def validar_senal_historica(df, condicion_activa, horizonte=HORIZONTE_VALIDACION):
+    disparos = np.where(condicion_activa)[0]
+    disparos = disparos[disparos < len(df) - horizonte]
+    if len(disparos) < 5:
+        return {'n_casos': len(disparos), 'win_rate': None, 'retorno_promedio': None, 'suficiente': False}
+    retornos = []
+    for idx in disparos:
+        precio_entrada = df.iloc[idx]['cierre']
+        precio_futuro = df.iloc[idx + horizonte]['cierre']
+        retornos.append((precio_futuro / precio_entrada - 1) * 100)
+    retornos = np.array(retornos)
+    return {
+        'n_casos': len(disparos),
+        'win_rate': (retornos > 0).mean() * 100,
+        'retorno_promedio': retornos.mean(),
+        'suficiente': len(disparos) >= 15,
+    }
 
-    for i in range(1, len(df)):
-        row, prev = df.iloc[i], df.iloc[i - 1]
-        precio_cierre = row['cierre']
 
-        if en_posicion:
-            nuevo_stop = precio_cierre - (atr_mult * row['ATR'])
-            if nuevo_stop > stop_loss:
-                stop_loss = nuevo_stop
-
-            salida = None
-            if row['minimo'] <= stop_loss:
-                salida = stop_loss * (1 - SLIPPAGE)
-            elif row['RSI'] >= 50.0:
-                salida = precio_cierre * (1 - SLIPPAGE)
-
-            if salida is not None:
-                ingreso_neto = (cantidad * salida) * (1 - COMISION)
-                efectivo += ingreso_neto
-                trades_pnl.append((salida / precio_entrada) - 1)
-                en_posicion = False
-                cantidad = 0.0
-                equity_curve.append(efectivo)
-                continue
-            else:
-                equity_curve.append(efectivo + cantidad * precio_cierre)
-                continue
-        else:
-            senal_sobreventa = (prev['RSI'] >= rsi_compra_thresh) and (row['RSI'] < rsi_compra_thresh)
-            regimen_de_rango = row['ADX'] < adx_max_thresh          # filtro: NO operar en tendencia fuerte
-
-            if filtro_tendencia == 'golden_cross':
-                tendencia_favorable = row['SMA_CORTA'] > row['SMA_LARGA']
-            else:  # 'ema200'
-                tendencia_favorable = precio_cierre > row['EMA_TENDENCIA']
-
-            if senal_sobreventa and regimen_de_rango and tendencia_favorable:
-                precio_entrada = precio_cierre * (1 + SLIPPAGE)
-                stop_loss = precio_entrada - (atr_mult * row['ATR'])
-                distancia_riesgo = precio_entrada - stop_loss
-
-                if distancia_riesgo > 0:
-                    riesgo_dinero = efectivo * riesgo_por_trade
-                    cantidad_por_riesgo = riesgo_dinero / distancia_riesgo
-                    cantidad_maxima = efectivo / precio_entrada
-                    cantidad = min(cantidad_por_riesgo, cantidad_maxima)
-                    costo = cantidad * precio_entrada
-                    efectivo -= costo
-                    en_posicion = True
-
-            equity_curve.append(efectivo if not en_posicion else efectivo + cantidad * precio_cierre)
-
-    if en_posicion:
-        salida = df.iloc[-1]['cierre'] * (1 - SLIPPAGE)
-        ingreso_neto = (cantidad * salida) * (1 - COMISION)
-        efectivo += ingreso_neto
-        trades_pnl.append((salida / precio_entrada) - 1)
-        equity_curve[-1] = efectivo
-
-    return efectivo, trades_pnl, equity_curve
+def es_mercado_spot_valido(exchange, simbolo):
+    mercado = exchange.markets.get(simbolo)
+    if mercado is None:
+        return False
+    return mercado.get('spot', False) is True and mercado.get('type', 'spot') == 'spot'
 
 
 # ==========================================================================
-# 5. MÉTRICAS COMPLETAS (periodos_por_anio=2190 para velas de 4h: 365*6)
+# 5. TELEGRAM Y ESTADO
 # ==========================================================================
-def calcular_metricas(capital_inicial, capital_final, trades_pnl, equity_curve, periodos_por_anio=2190):
-    equity = np.array(equity_curve, dtype=float)
-    retornos_por_vela = np.diff(equity) / equity[:-1]
-    retornos_por_vela = retornos_por_vela[np.isfinite(retornos_por_vela)]
+def enviar_alerta_telegram(mensaje):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Faltan las credenciales de Telegram.")
+        print(mensaje)
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
+    try:
+        response = requests.post(url, json=payload, timeout=15)
+        print("📱 Alerta enviada." if response.status_code == 200 else f"❌ Error Telegram: {response.text}")
+    except Exception as e:
+        print(f"❌ Excepción en Telegram: {e}")
 
-    retorno_total = (capital_final / capital_inicial - 1) * 100
 
-    pico = np.maximum.accumulate(equity)
-    drawdown = (equity - pico) / pico
-    max_dd = drawdown.min() * 100 if len(drawdown) else 0.0
+def cargar_estado():
+    if os.path.exists(ESTADO_PATH):
+        try:
+            with open(ESTADO_PATH, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
-    if retornos_por_vela.std() > 0:
-        sharpe = (retornos_por_vela.mean() / retornos_por_vela.std()) * np.sqrt(periodos_por_anio)
+
+def guardar_estado(estado):
+    with open(ESTADO_PATH, 'w') as f:
+        json.dump(estado, f, indent=2)
+
+
+# ==========================================================================
+# 6. ANÁLISIS DE UN ACTIVO DE "MEDIANO/LARGO PLAZO" (núcleo o intermedio)
+#    Misma lógica, umbrales configurables por nivel para reflejar distinta
+#    volatilidad esperada (SOL necesita más margen que BTC/ETH).
+# ==========================================================================
+def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, rsi_compra, rsi_venta, sobreprecio_pct):
+    velas = descargar_velas_cerradas(exchange, simbolo, temporalidad, VELAS_ANALISIS)
+    if not velas or len(velas) < 60:
+        return None
+
+    df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+    df['RSI'] = calcular_rsi(df['cierre'], period=14)
+    df['Media_30'] = df['cierre'].rolling(window=30).mean()
+    df['ATR'] = calcular_atr(df, period=14)
+    df = df.dropna().reset_index(drop=True)
+    if len(df) < 30:
+        return None
+
+    precio = df.iloc[-1]['cierre']
+    rsi = df.iloc[-1]['RSI']
+    media_30 = df.iloc[-1]['Media_30']
+    atr = df.iloc[-1]['ATR']
+
+    condicion_descuento = (df['cierre'] <= df['Media_30'] * (1 - descuento_pct)) | (df['RSI'] < rsi_compra)
+    condicion_sobrecompra = df['RSI'] >= rsi_venta
+
+    if precio <= (media_30 * (1 - descuento_pct)) or rsi < rsi_compra:
+        accion = "COMPRAR"
+        etiqueta = "🟢 *COMPRAR* (activo en descuento por corrección)"
+        validacion = validar_senal_historica(df, condicion_descuento.values)
+    elif rsi >= rsi_venta:
+        accion = "EVALUAR_VENTA"
+        etiqueta = "🟡 *EVALUAR TOMA DE BENEFICIOS* (sobrecalentamiento)"
+        validacion = validar_senal_historica(df, condicion_sobrecompra.values)
+    elif precio > (media_30 * (1 + sobreprecio_pct)):
+        accion = "ESPERAR"
+        etiqueta = "🔴 *ESPERAR* (precio por encima del promedio, mantén liquidez)"
+        validacion = None
     else:
-        sharpe = 0.0
+        accion = "NEUTRO"
+        etiqueta = "⚪ *ZONA NEUTRA*"
+        validacion = None
 
-    bajistas = retornos_por_vela[retornos_por_vela < 0]
-    if len(bajistas) > 0 and bajistas.std() > 0:
-        sortino = (retornos_por_vela.mean() / bajistas.std()) * np.sqrt(periodos_por_anio)
-    else:
-        sortino = 0.0
-
-    velas_totales = max(len(equity), 1)
-    retorno_anualizado = ((capital_final / capital_inicial) ** (periodos_por_anio / velas_totales) - 1) * 100
-    calmar = (retorno_anualizado / abs(max_dd)) if max_dd != 0 else 0.0
-
-    ganancias = [p for p in trades_pnl if p > 0]
-    perdidas = [p for p in trades_pnl if p <= 0]
-    profit_factor = (sum(ganancias) / abs(sum(perdidas))) if perdidas and sum(perdidas) != 0 else (np.inf if ganancias else 0.0)
-    win_rate = (len(ganancias) / len(trades_pnl) * 100) if trades_pnl else 0.0
+    distancia_atr = atr * 2.5
+    sugerencia_tamano = (CAPITAL_REFERENCIA * RIESGO_POR_TRADE / distancia_atr) if distancia_atr > 0 else None
 
     return {
-        'Retorno (%)': retorno_total,
-        'Retorno Anualizado (%)': retorno_anualizado,
-        'Max Drawdown (%)': max_dd,
-        'Sharpe': sharpe,
-        'Sortino': sortino,
-        'Calmar': calmar,
-        'Profit Factor': profit_factor,
-        'Win Rate (%)': win_rate,
-        'Trades': len(trades_pnl),
+        'simbolo': simbolo, 'precio': precio, 'rsi': rsi, 'media_30': media_30,
+        'accion': accion, 'etiqueta': etiqueta, 'validacion': validacion,
+        'sugerencia_tamano': sugerencia_tamano, 'atr': atr,
     }
 
 
 # ==========================================================================
-# 6. GRID SEARCH (3 parámetros: ATR, RSI, ADX_max) + ESTABILIDAD GENERALIZADA
+# 7. BOT MAESTRO
 # ==========================================================================
-def grid_search(df, combinaciones, capital_inicial, riesgo_por_trade):
-    resultados = []
-    for atr_mult, rsi_thresh, adx_max, filtro_tendencia in combinaciones:
-        capital_final, trades_pnl, equity_curve = backtest(
-            df, atr_mult, rsi_thresh, adx_max, filtro_tendencia, capital_inicial, riesgo_por_trade
-        )
-        metricas = calcular_metricas(capital_inicial, capital_final, trades_pnl, equity_curve)
-        metricas['ATR Multiplier'] = atr_mult
-        metricas['RSI Compra'] = rsi_thresh
-        metricas['ADX Max'] = adx_max
-        metricas['Filtro Tendencia'] = filtro_tendencia
-        resultados.append(metricas)
-    return pd.DataFrame(resultados)
-
-
-def puntuar_estabilidad(df_resultados, params_dict, columna='Sharpe'):
-    """
-    Versión generalizada a N parámetros (antes solo soportaba 2D).
-    Promedia la métrica de cada combinación con sus vecinos inmediatos
-    en cada dimensión del grid. Un parámetro rodeado de buenos vecinos es
-    robusto; un pico aislado suele ser sobreajuste.
-    """
-    col_names = list(params_dict.keys())
-    tabla = df_resultados.set_index(col_names)[columna]
-
-    estabilidad = []
-    for idx in tabla.index:
-        idx_vals = idx if isinstance(idx, tuple) else (idx,)
-        posiciones = [params_dict[c].index(v) for c, v in zip(col_names, idx_vals)]
-        rangos = [range(p - 1, p + 2) for p in posiciones]
-
-        vecinos = []
-        for combo in itertools.product(*rangos):
-            if all(0 <= combo[i] < len(params_dict[col_names[i]]) for i in range(len(col_names))):
-                key = tuple(params_dict[col_names[i]][combo[i]] for i in range(len(col_names)))
-                if key in tabla.index:
-                    vecinos.append(tabla.loc[key])
-        estabilidad.append(np.mean(vecinos))
-
-    df_res = df_resultados.copy()
-    df_res[f'{columna} Estabilidad'] = estabilidad
-    return df_res
-
-
-# ==========================================================================
-# 7. BENCHMARK: BUY & HOLD
-# ==========================================================================
-def buy_and_hold(df, capital_inicial):
-    precio_inicio = df.iloc[0]['cierre']
-    precio_fin = df.iloc[-1]['cierre']
-    cantidad = (capital_inicial * (1 - COMISION)) / (precio_inicio * (1 + SLIPPAGE))
-    capital_final = cantidad * precio_fin * (1 - SLIPPAGE) * (1 - COMISION)
-    equity_curve = capital_inicial * (df['cierre'] / precio_inicio).values
-    retorno_pct = (capital_final / capital_inicial - 1) * 100
-
-    pico = np.maximum.accumulate(equity_curve)
-    drawdown = (equity_curve - pico) / pico
-    max_dd = drawdown.min() * 100 if len(drawdown) else 0.0
-
-    return retorno_pct, max_dd
-
-
-# ==========================================================================
-# 8. BOOTSTRAP: intervalo de confianza sobre los trades OOS
-# ==========================================================================
-def bootstrap_confianza(trades_pnl, n_iter=2000, seed=7):
-    if len(trades_pnl) < 3:
-        return None
-    rng = np.random.default_rng(seed)
-    trades = np.array(trades_pnl)
-    retornos_simulados = []
-    for _ in range(n_iter):
-        muestra = rng.choice(trades, size=len(trades), replace=True)
-        retorno_compuesto = np.prod(1 + muestra) - 1
-        retornos_simulados.append(retorno_compuesto * 100)
-    retornos_simulados = np.array(retornos_simulados)
-    p5, p50, p95 = np.percentile(retornos_simulados, [5, 50, 95])
-    return {'p5': p5, 'mediana': p50, 'p95': p95}
-
-
-# ==========================================================================
-# 9. WALK-FORWARD ANALYSIS
-# ==========================================================================
-def walk_forward(df, combinaciones, params_dict, n_folds, capital_inicial, riesgo_por_trade):
-    n = len(df)
-    tam_fold = n // (n_folds + 1)
-    resultados_oos = []
-    trades_agregados = []
-
-    for fold in range(1, n_folds + 1):
-        fin_train = tam_fold * fold
-        fin_test = min(tam_fold * (fold + 1), n)
-        if fin_test <= fin_train:
-            break
-
-        df_train = df.iloc[:fin_train].reset_index(drop=True)
-        df_test = df.iloc[fin_train:fin_test].reset_index(drop=True)
-        if len(df_train) < 60 or len(df_test) < 10:
-            continue
-
-        res_train = grid_search(df_train, combinaciones, capital_inicial, riesgo_por_trade)
-        res_train = puntuar_estabilidad(res_train, params_dict, columna='Sharpe')
-        mejor = res_train.sort_values('Sharpe Estabilidad', ascending=False).iloc[0]
-        atr_elegido = mejor['ATR Multiplier']
-        rsi_elegido = mejor['RSI Compra']
-        adx_elegido = mejor['ADX Max']
-        filtro_elegido = mejor['Filtro Tendencia']
-        sharpe_in_sample = mejor['Sharpe']
-
-        capital_final, trades_pnl, equity_curve = backtest(
-            df_test, atr_elegido, rsi_elegido, adx_elegido, filtro_elegido, capital_inicial, riesgo_por_trade
-        )
-        metricas_oos = calcular_metricas(capital_inicial, capital_final, trades_pnl, equity_curve)
-
-        bh_retorno, bh_dd = buy_and_hold(df_test, capital_inicial)
-        ratio_overfitting = (metricas_oos['Sharpe'] / sharpe_in_sample) if sharpe_in_sample != 0 else np.nan
-
-        metricas_oos['Fold'] = fold
-        metricas_oos['ATR'] = atr_elegido
-        metricas_oos['RSI'] = rsi_elegido
-        metricas_oos['ADX Max'] = adx_elegido
-        metricas_oos['Filtro Tendencia'] = filtro_elegido
-        metricas_oos['Sharpe In-Sample'] = sharpe_in_sample
-        metricas_oos['Ratio OOS/IS'] = ratio_overfitting
-        metricas_oos['Buy&Hold (%)'] = bh_retorno
-        resultados_oos.append(metricas_oos)
-        trades_agregados.extend(trades_pnl)
-
-    return pd.DataFrame(resultados_oos), trades_agregados
-
-
-# ==========================================================================
-# 10. EJECUCIÓN GENERAL
-# ==========================================================================
-if __name__ == '__main__':
+def ejecutar_bot_maestro():
     exchange = ccxt.kraken()
-    combinaciones = list(itertools.product(PARAMS_ATR, PARAMS_RSI_COMPRA, PARAMS_ADX_MAX, PARAMS_FILTRO_TENDENCIA))
-    params_dict = {
-        'ATR Multiplier': PARAMS_ATR,
-        'RSI Compra': PARAMS_RSI_COMPRA,
-        'ADX Max': PARAMS_ADX_MAX,
-        'Filtro Tendencia': PARAMS_FILTRO_TENDENCIA,
-    }
-    print(f"Grid total: {len(combinaciones)} combinaciones "
-          f"(mezcla de valores propios y valores de manual, elegidos por evidencia OOS)\n")
-    resultados_globales = []
-    filas_grid_export = []
-    filas_folds_export = []
+    exchange.load_markets()
 
-    print("="*95)
-    print(" ESCÁNER (REVERSIÓN A LA MEDIA RSI + FILTRO DE RÉGIMEN ADX + FILTRO EMA200)")
-    print("="*95)
+    print("="*70)
+    print(" ESCÁNER CUANTITATIVO MAESTRO (NÚCLEO / INTERMEDIO / SATÉLITE)")
+    print("="*70)
 
-    for simbolo in SIMBOLOS:
-        print(f"\n{'#'*95}")
-        print(f" ACTIVO: {simbolo}")
-        print(f"{'#'*95}")
+    estado_anterior = cargar_estado()
+    estado_nuevo = {}
+    alertas_nucleo, alertas_intermedio, alertas_satelite = [], [], []
 
-        df_raw = descargar_historial_completo(exchange, simbolo, TEMPORALIDAD, MAX_VELAS)
-        if df_raw.empty or len(df_raw) < 250:
-            print(f"⚠️ Historial insuficiente para {simbolo}. Saltando...")
-            continue
+    # --- ESCUDO MACRO (siempre diario, fail-safe) ---
+    print("\n🛡️ Verificando Escudo Macro (BTC, diario)...")
+    btc_saludable = False
+    escudo_verificado = False
+    try:
+        velas_btc = descargar_velas_cerradas(exchange, 'BTC/USD', TEMPORALIDAD_ESCUDO, VELAS_ESCUDO_BTC)
+        if velas_btc and len(velas_btc) >= 50:
+            df_btc = pd.DataFrame(velas_btc, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+            df_btc['SMA_50'] = df_btc['cierre'].rolling(window=50).mean()
+            precio_btc = df_btc.iloc[-1]['cierre']
+            sma_50_btc = df_btc.iloc[-1]['SMA_50']
+            btc_saludable = precio_btc >= sma_50_btc
+            escudo_verificado = True
+            print(f"  BTC {'✅ saludable' if btc_saludable else '⚠️ débil'}: {precio_btc:.2f} vs SMA50 {sma_50_btc:.2f}")
+    except Exception as e:
+        print(f"⚠️ Error al verificar el escudo macro: {e}")
 
-        df_base = calcular_indicadores(df_raw)
-        dias_cubiertos = len(df_base) * 4 / 24
-        print(f"Velas utilizables: {len(df_base)}  (~{dias_cubiertos:.0f} días de historial)")
+    if not escudo_verificado:
+        btc_saludable = False
+        print("  -> No verificable: satélites bloqueados por seguridad.")
 
-        print(f"\n--- SECCIÓN A: Grid search in-sample ({len(combinaciones)} combinaciones) ---")
-        res_completo = grid_search(df_base, combinaciones, CAPITAL_INICIAL, RIESGO_POR_TRADE)
-        res_completo = puntuar_estabilidad(res_completo, params_dict, columna='Sharpe')
-        res_completo = res_completo.sort_values('Sharpe Estabilidad', ascending=False).reset_index(drop=True)
+    # --- NÚCLEO CONSERVADOR (BTC/ETH, diario, umbrales estándar) ---
+    print("\n🛡️ Analizando Núcleo Conservador (BTC/ETH)...")
+    for simbolo in NUCLEO_CONSERVADOR:
+        try:
+            r = analizar_activo_largo_plazo(
+                exchange, simbolo, TEMPORALIDAD_NUCLEO,
+                descuento_pct=0.04, rsi_compra=40, rsi_venta=75, sobreprecio_pct=0.05
+            )
+            if r:
+                alertas_nucleo.append(r)
+                estado_nuevo[simbolo] = r['accion']
+        except Exception as e:
+            print(f"⚠️ Error en Núcleo {simbolo}: {e}")
 
-        cols_a = ['ATR Multiplier', 'RSI Compra', 'ADX Max', 'Filtro Tendencia', 'Retorno (%)',
-                  'Retorno Anualizado (%)', 'Max Drawdown (%)', 'Sharpe', 'Sharpe Estabilidad', 'Sortino', 'Calmar',
-                  'Profit Factor', 'Win Rate (%)', 'Trades']
-        print(res_completo[cols_a].head(5).to_string(index=False))
+    # --- NIVEL INTERMEDIO (SOL, diario, umbrales más anchos por su volatilidad) ---
+    print("\n🟠 Analizando Nivel Intermedio (SOL)...")
+    for simbolo in NIVEL_INTERMEDIO:
+        try:
+            r = analizar_activo_largo_plazo(
+                exchange, simbolo, TEMPORALIDAD_INTERMEDIO,
+                descuento_pct=0.07, rsi_compra=35, rsi_venta=80, sobreprecio_pct=0.08
+            )
+            if r:
+                alertas_intermedio.append(r)
+                estado_nuevo[simbolo] = r['accion']
+        except Exception as e:
+            print(f"⚠️ Error en Intermedio {simbolo}: {e}")
 
-        for _, r in res_completo.iterrows():
-            fila = r.to_dict()
-            fila['Activo'] = simbolo
-            filas_grid_export.append(fila)
+    # --- SATÉLITE (4h, dinámico, filtro ADX de régimen) ---
+    if btc_saludable:
+        print(f"\n🚀 Analizando Satélite ({TEMPORALIDAD_SATELITE}, con filtro de régimen ADX)...")
+        try:
+            tickers = exchange.fetch_tickers()
+            excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_INTERMEDIO)
+            candidatas = []
+            for s, ticker in tickers.items():
+                if '/USD' not in s or s in excluidos or 'USDT' in s or 'USDC' in s:
+                    continue
+                if not es_mercado_spot_valido(exchange, s):
+                    continue
+                vol = ticker.get('quoteVolume', 0)
+                if vol and vol > 1_000_000:
+                    candidatas.append((s, vol))
+            candidatas.sort(key=lambda x: x[1], reverse=True)
+            top_altcoins = [item[0] for item in candidatas[:5]]
 
-        bh_total_retorno, bh_total_dd = buy_and_hold(df_base, CAPITAL_INICIAL)
-        print(f"\nBuy & Hold sobre todo el historial: {bh_total_retorno:+.2f}% | Max DD: {bh_total_dd:.2f}%")
+            for simbolo in top_altcoins:
+                try:
+                    velas = descargar_velas_cerradas(exchange, simbolo, TEMPORALIDAD_SATELITE, VELAS_ANALISIS)
+                    if not velas or len(velas) < 60:
+                        continue
+                    df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+                    df['RSI'] = calcular_rsi(df['cierre'], period=14)
+                    _, _, lower = calcular_bollinger_bands(df['cierre'])
+                    df['BB_Lower'] = lower
+                    df['Vol_Medio'] = df['volumen'].rolling(window=20).mean()
+                    df['ATR'] = calcular_atr(df, period=14)
+                    df['ADX'] = calcular_adx(df, period=14)
+                    df['EMA_TENDENCIA'] = df['cierre'].ewm(span=200, adjust=False).mean()
+                    df = df.dropna().reset_index(drop=True)
+                    if len(df) < 30:
+                        continue
 
-        print(f"\n--- SECCIÓN B: Walk-forward ({N_FOLDS_WALK_FORWARD} folds, out-of-sample real) ---")
-        res_wf, trades_oos_agregados = walk_forward(
-            df_base, combinaciones, params_dict,
-            N_FOLDS_WALK_FORWARD, CAPITAL_INICIAL, RIESGO_POR_TRADE
-        )
+                    ultima = df.iloc[-1]
+                    regimen_ok = ultima['ADX'] < SATELITE_ADX_MAX
+                    tendencia_ok = ultima['cierre'] > ultima['EMA_TENDENCIA']
+                    condicion_entrada = (
+                        (df['RSI'] <= SATELITE_RSI_ENTRADA) &
+                        (df['cierre'] <= df['BB_Lower'] * 1.01) &
+                        (df['volumen'] >= df['Vol_Medio'] * 0.7) &
+                        (df['ADX'] < SATELITE_ADX_MAX)
+                    )
 
-        if res_wf.empty:
-            print("No hay suficientes datos para correr walk-forward en este activo.")
-            continue
+                    if (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01
+                            and ultima['volumen'] >= ultima['Vol_Medio'] * 0.7 and regimen_ok and tendencia_ok):
 
-        cols_wf = ['Fold', 'ATR', 'RSI', 'ADX Max', 'Filtro Tendencia', 'Retorno (%)', 'Buy&Hold (%)',
-                   'Max Drawdown (%)', 'Sharpe', 'Sharpe In-Sample', 'Ratio OOS/IS', 'Sortino', 'Calmar',
-                   'Profit Factor', 'Win Rate (%)', 'Trades']
-        print(res_wf[cols_wf].to_string(index=False))
+                        sl = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR'])
+                        tp = ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
+                        validacion = validar_senal_historica(df, condicion_entrada.values)
+                        distancia_riesgo = ultima['cierre'] - sl
+                        sugerencia_tamano = (CAPITAL_REFERENCIA * RIESGO_POR_TRADE / distancia_riesgo) if distancia_riesgo > 0 else None
 
-        for _, r in res_wf.iterrows():
-            fila = r.to_dict()
-            fila['Activo'] = simbolo
-            filas_folds_export.append(fila)
-
-        retorno_oos_compuesto = np.prod(1 + res_wf['Retorno (%)'] / 100) - 1
-        retorno_bh_compuesto = np.prod(1 + res_wf['Buy&Hold (%)'] / 100) - 1
-        sharpe_promedio = res_wf['Sharpe'].mean()
-        drawdown_promedio = res_wf['Max Drawdown (%)'].mean()
-        trades_totales = int(res_wf['Trades'].sum())
-        win_rate_promedio = res_wf['Win Rate (%)'].mean()
-        ratio_overfitting_promedio = res_wf['Ratio OOS/IS'].replace([np.inf, -np.inf], np.nan).mean()
-
-        print(f"\nRetorno OOS compuesto (estrategia RSI): {retorno_oos_compuesto*100:+.2f}%")
-        print(f"Retorno OOS compuesto (Buy & Hold):     {retorno_bh_compuesto*100:+.2f}%")
-        print(f"Diferencia vs Buy & Hold:               {(retorno_oos_compuesto - retorno_bh_compuesto)*100:+.2f} pts")
-        print(f"Max Drawdown promedio OOS: {drawdown_promedio:.2f}%")
-        print(f"Sharpe promedio OOS: {sharpe_promedio:.2f}")
-        print(f"Ratio Sharpe OOS/In-Sample promedio: {ratio_overfitting_promedio:.2f}  "
-              f"(cercano a 1 = robusto; cercano a 0 o negativo = probable sobreajuste)")
-
-        if trades_totales < MIN_TRADES_CONFIABLE:
-            print(f"⚠️  Solo {trades_totales} trades OOS — muestra INSUFICIENTE "
-                  f"(mínimo recomendado: {MIN_TRADES_CONFIABLE}).")
-        else:
-            print(f"✅ Muestra suficiente ({trades_totales} trades OOS).")
-
-        boot = bootstrap_confianza(trades_oos_agregados, N_ITER_BOOTSTRAP)
-        if boot:
-            print(f"Intervalo de confianza (bootstrap, 90%): [{boot['p5']:+.2f}%, {boot['p95']:+.2f}%] "
-                  f"| mediana: {boot['mediana']:+.2f}%")
-            if boot['p5'] < 0 < boot['p95']:
-                print("   -> El intervalo incluye 0%: no se puede afirmar con confianza que haya edge real.")
-        else:
-            print("Muestra demasiado chica para calcular un intervalo de confianza confiable.")
-
-        resultados_globales.append({
-            'Activo': simbolo,
-            'Retorno OOS Compuesto (%)': retorno_oos_compuesto * 100,
-            'Buy&Hold OOS Compuesto (%)': retorno_bh_compuesto * 100,
-            'Diferencia vs B&H (pts)': (retorno_oos_compuesto - retorno_bh_compuesto) * 100,
-            'Sharpe OOS Promedio': sharpe_promedio,
-            'Ratio OOS/IS Promedio': ratio_overfitting_promedio,
-            'Max Drawdown Promedio (%)': drawdown_promedio,
-            'Win Rate Promedio (%)': win_rate_promedio,
-            'Total Trades OOS': trades_totales,
-            'Muestra Suficiente': trades_totales >= MIN_TRADES_CONFIABLE,
-        })
-
-    if resultados_globales:
-        df_final = pd.DataFrame(resultados_globales).sort_values(
-            by='Retorno OOS Compuesto (%)', ascending=False).reset_index(drop=True)
-
-        print("\n" + "="*105)
-        print(" RANKING GLOBAL DEFINITIVO (RSI + Filtro ADX + Filtro EMA200 — OOS vs Buy & Hold)")
-        print("="*105)
-        print(df_final.to_string(index=False))
-        print("="*105)
-
-        df_final.to_csv('ranking_global_rsi_v2.csv', index=False)
-        pd.DataFrame(filas_grid_export).to_csv('grid_in_sample_rsi_v2.csv', index=False)
-        pd.DataFrame(filas_folds_export).to_csv('walk_forward_rsi_v2.csv', index=False)
-        print("\nArchivos exportados: ranking_global_rsi_v2.csv, grid_in_sample_rsi_v2.csv, walk_forward_rsi_v2.csv")
+                        alertas_satelite.append({
+                            'simbolo': simbolo, 'precio': ultima['cierre'], 'rsi': ultima['RSI'],
+                            'tp': tp, 'sl': sl, 'validacion': validacion, 'sugerencia_tamano': sugerencia_tamano,
+                        })
+                        estado_nuevo[simbolo] = 'SATELITE_ENTRADA'
+                except Exception as e:
+                    print(f"⚠️ Error en satélite {simbolo}: {e}")
+        except Exception as e:
+            print(f"⚠️ Error obteniendo tickers: {e}")
     else:
-        print("No se pudieron generar resultados globales.")
+        print("\n🚫 Satélites bloqueados (escudo macro no saludable o no verificable).")
+
+    # --- REPORTE ---
+    def hubo_cambio(simbolo, accion):
+        return estado_anterior.get(simbolo) != accion
+
+    def filtrar(lista, clave_estado):
+        return [a for a in lista if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], a.get('accion', clave_estado))]
+
+    nucleo_enviar = filtrar(alertas_nucleo, None)
+    intermedio_enviar = filtrar(alertas_intermedio, None)
+    satelite_enviar = [a for a in alertas_satelite if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], 'SATELITE_ENTRADA')]
+
+    def bloque_texto(titulo, lista, es_satelite=False):
+        texto = f"{titulo}\n"
+        for op in lista:
+            if es_satelite:
+                texto += (f"• *{op['simbolo']}* | Entrada: `${op['precio']:,.2f}` | RSI: `{op['rsi']:.1f}`\n"
+                          f"  🎯 TP: `${op['tp']:,.2f}` | 🛑 SL: `${op['sl']:,.2f}`\n")
+            else:
+                texto += f"• *{op['simbolo']}* | Precio: `${op['precio']:,.2f}` | RSI: `{op['rsi']:.1f}`\n  {op['etiqueta']}\n"
+            v = op['validacion']
+            if v and v['suficiente']:
+                texto += f"  📊 Histórico ({v['n_casos']} casos): win rate {v['win_rate']:.0f}%, retorno prom. {v['retorno_promedio']:+.1f}%\n"
+            elif v and v['n_casos'] > 0:
+                texto += f"  ⚠️ Solo {v['n_casos']} casos históricos — poco confiable\n"
+            if op.get('sugerencia_tamano'):
+                texto += f"  📏 Tamaño orientativo: `{op['sugerencia_tamano']:.4f}` unidades\n"
+            texto += "\n"
+        return texto
+
+    if nucleo_enviar or intermedio_enviar or satelite_enviar:
+        ahora = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        mensaje = f"🚨 *REPORTE CUANTITATIVO* — {ahora}\n\n"
+        if nucleo_enviar:
+            mensaje += bloque_texto("🛡️ *NÚCLEO CONSERVADOR (BTC/ETH)*", nucleo_enviar)
+        if intermedio_enviar:
+            mensaje += bloque_texto("🟠 *NIVEL INTERMEDIO (SOL)*", intermedio_enviar)
+        if satelite_enviar:
+            mensaje += bloque_texto("🚀 *SATÉLITE (alto riesgo, 4h)*", satelite_enviar, es_satelite=True)
+        mensaje += ("_Herramienta de apoyo con validación histórica limitada. "
+                    "No es asesoría financiera personalizada._")
+        enviar_alerta_telegram(mensaje)
+    else:
+        print("\nℹ️ Sin cambios de estado respecto a la última corrida.")
+
+    guardar_estado(estado_nuevo)
+
+
+if __name__ == '__main__':
+    ejecutar_bot_maestro()
