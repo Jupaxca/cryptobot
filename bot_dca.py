@@ -38,7 +38,7 @@ def enviar_alerta_telegram(mensaje):
     try:
         response = requests.post(url, json=payload)
         if response.status_code == 200:
-            print("📱 Alerta de prueba enviada con éxito a Telegram.")
+            print("📱 Alerta institucional definitiva enviada con éxito.")
         else:
             print(f"❌ Error al enviar Telegram: {response.text}")
     except Exception as e:
@@ -47,7 +47,7 @@ def enviar_alerta_telegram(mensaje):
 def ejecutar_bot_maestro():
     exchange = ccxt.kraken()
     print("="*60)
-    print(" PRUEBA DE FUEGO: ESCÁNER MAESTRO (MODO TEST FORZADO)")
+    print(" ESCÁNER CUANTITATIVO MAESTRO 24/7 (CORE-SATELLITE + INTELIGENCIA DCA)")
     print("="*60)
     
     alertas_core = []
@@ -63,32 +63,58 @@ def ejecutar_bot_maestro():
             df_btc['SMA_50'] = df_btc['cierre'].rolling(window=50).mean()
             precio_btc = df_btc.iloc[-1]['cierre']
             sma_50_btc = df_btc.iloc[-1]['SMA_50']
-            print(f"  Bitcoin Precio: ${precio_btc:,.2f} | SMA 50: ${sma_50_btc:,.2f}")
+            
+            if precio_btc < sma_50_btc:
+                btc_saludable = False
+                print("  ⚠️ ADVERTENCIA: Bitcoin por debajo de su SMA 50. Bloqueo de Satélites.")
+            else:
+                print("  ✅ Bitcoin en tendencia macro saludable. Luz verde para satélites.")
     except Exception as e:
-        print(f"⚠️ Error al verificar BTC: {e}")
+        print(f"⚠️ Error al verificar el escudo macro de BTC: {e}")
 
-    # --- BLOQUE CONSERVADOR (95% - Core) [MODIFICADO PARA PRUEBA] ---
-    print("\n🛡️ Analizando Núcleo Conservador (Modo Test)...")
+    # --- BLOQUE CONSERVADOR (95% - Core / Acumulación Inteligente) ---
+    print("\n🛡️ Analizando Núcleo Conservador con Diagnóstico Táctico...")
     for simbolo in CORE_ASSETS:
         try:
             velas = exchange.fetch_ohlcv(simbolo, timeframe=TEMPORALIDAD, limit=50)
-            if not velas or len(velas) < 30:
+            if not velas or len(velas) < 35:
                 continue
+                
             df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
             df['RSI'] = calcular_rsi(df['cierre'], period=14)
+            df['Media_30'] = df['cierre'].rolling(window=30).mean()
             
             precio = df.iloc[-1]['cierre']
             rsi = df.iloc[-1]['RSI']
+            media_30 = df.iloc[-1]['Media_30']
             
-            # FILTRO DE PRUEBA: Forzamos la alerta
-            if rsi <= 100:
-                alertas_core.append({'simbolo': simbolo, 'precio': precio, 'rsi': rsi})
+            # LÓGICA DE INTERPRETACIÓN TÁCTICA:
+            # 1. Si el precio está por debajo de la media de 30 días o RSI < 40 -> COMPRAR (Descuento)
+            # 2. Si el RSI > 75 -> EVALUAR VENTA (Sobrecalentamiento)
+            # 3. Si el precio está muy por arriba de la media y RSI normal -> ESPERAR (Precio Caro)
+            
+            if precio <= (media_30 * 0.96) or rsi < 40:
+                accion = "🟢 *COMPRAR* (Activo en descuento por corrección)"
+            elif rsi >= 75:
+                accion = "🟡 *EVALUAR TOMA DE BENEFICIOS* (Sobrecalentamiento extremo)"
+            elif precio > (media_30 * 1.05):
+                accion = "🔴 *ESPERAR* (Precio por encima del promedio, mantén liquidez)"
+            else:
+                accion = "⚪ *ZONA NEUTRA* (Esperar mejor estructura)"
+
+            alertas_core.append({
+                'simbolo': simbolo,
+                'precio': precio,
+                'rsi': rsi,
+                'media_30': media_30,
+                'accion': accion
+            })
         except Exception as e:
             print(f"⚠️ Error en Core {simbolo}: {e}")
 
-    # --- BLOQUE DE ALTO RIESGO / REBOTE (5% - Satélite) [MODIFICADO PARA PRUEBA] ---
+    # --- BLOQUE DE ALTO RIESGO / REBOTE (5% - Satélite) ---
     if btc_saludable:
-        print("\n🚀 Analizando Satélite de Corto Plazo (Modo Test)...")
+        print("\n🚀 Analizando Satélite de Corto Plazo (Filtros Avanzados)...")
         try:
             tickers = exchange.fetch_tickers()
             altcoins_candidatas = []
@@ -99,56 +125,61 @@ def ejecutar_bot_maestro():
                         altcoins_candidatas.append((s, volumen_usd))
             
             altcoins_candidatas.sort(key=lambda x: x[1], reverse=True)
-            top_altcoins = [item[0] for item in altcoins_candidatas[:2]] # Tomamos 2 para la prueba
-            
+            top_altcoins = [item[0] for item in altcoins_candidatas[:5]]
+
             for simbolo in top_altcoins:
                 velas = exchange.fetch_ohlcv(simbolo, timeframe=TEMPORALIDAD, limit=50)
                 if not velas or len(velas) < 30:
                     continue
                 df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
                 df['RSI'] = calcular_rsi(df['cierre'], period=14)
-                
+                upper, middle, lower = calcular_bollinger_bands(df['cierre'])
+                df['BB_Lower'] = lower
+                df['Vol_Medio'] = df['volumen'].rolling(window=20).mean()
+
                 precio = df.iloc[-1]['cierre']
                 rsi = df.iloc[-1]['RSI']
-                
-                # FILTRO DE PRUEBA: Forzamos la alerta para ver Take Profit y Stop Loss
-                if rsi <= 90:
-                    tp = precio * 1.08   # Take Profit +8%
-                    sl = precio * 0.95   # Stop Loss -5%
+                bb_lower = df.iloc[-1]['BB_Lower']
+                volumen_actual = df.iloc[-1]['volumen']
+                volumen_promedio = df.iloc[-1]['Vol_Medio']
+
+                if rsi <= 33 and precio <= bb_lower * 1.01 and volumen_actual >= (volumen_promedio * 0.7):
+                    tp = precio * 1.08  
+                    sl = precio * 0.95  
                     alertas_satelite.append({
-                        'simbolo': simbolo, 
-                        'precio': precio, 
-                        'rsi': rsi, 
-                        'tp': tp, 
-                        'sl': sl
+                        'simbolo': simbolo, 'precio': precio, 'rsi': rsi, 'tp': tp, 'sl': sl
                     })
         except Exception as e:
-            print(f"⚠️ Error analizando satélites: {e}")
+            print(f"⚠️ Error analizando satélites avanzados: {e}")
+    else:
+        print("\n🚫 Satélites bloqueados por el Escudo Macro de Bitcoin.")
 
     # --- CONSTRUCCIÓN DEL REPORTE FINAL ---
     if alertas_core or alertas_satelite:
-        mensaje = "🚨 *MENSAJE DE PRUEBA - REPORTE MAESTRO* 🚨\n\n"
+        mensaje = "🚨 *REPORTE INSTITUCIONAL MAESTRO CON INTELIGENCIA TÁCTICA* 🚨\n\n"
         
         if alertas_core:
-            mensaje += "🛡️ *BLOQUE CONSERVADOR (95% - Núcleo)*\n"
+            mensaje += "🛡️ *BLOQUE CONSERVADOR (95% - Núcleo / DCA)*\n"
             for op in alertas_core:
-                mensaje += f"• *{op['simbolo']}* | Precio: `${op['precio']:,.2f}` | RSI: `{op['rsi']:.1f}`\n"
-            mensaje += "\n"
-            
+                mensaje += (
+                    f"• *{op['simbolo']}* | Precio: `${op['precio']:,.2f}` | RSI: `{op['rsi']:.1f}`\n"
+                    f"  Acción Sugerida: {op['accion']}\n\n"
+                )
+        
         if alertas_satelite:
             mensaje += "🚀 *BLOQUE DE ALTO RIESGO (5% - Satélite)*\n"
             for op in alertas_satelite:
                 mensaje += (
-                    f"• *{op['simbolo']}* (Modo Prueba Forzada)\n"
+                    f"• *{op['simbolo']}* (Bollinger + Volumen + Escudo BTC OK)\n"
                     f"  Entrada: `${op['precio']:,.2f}` | RSI: `{op['rsi']:.1f}`\n"
                     f"  🎯 *Take Profit (+8%):* `${op['tp']:,.2f}`\n"
                     f"  🛑 *Stop Loss (-5%):* `${op['sl']:,.2f}`\n\n"
                 )
-        
-        mensaje += "💡 _Esta es una notificación de prueba para verificar tu bot._"
+                
+        mensaje += "💡 _Sistema autónomo 24/7 con gestión de acumulación inteligente._"
         enviar_alerta_telegram(mensaje)
     else:
-        print("\nℹ️ No se generaron alertas.")
+        print("\nℹ️ Monitoreo sin activaciones.")
 
 if __name__ == '__main__':
-    ejecutar_bot_maestro()
+    executar_bot_maestro()
