@@ -182,4 +182,4 @@ def ejecutar_bot_maestro():
         print("\nℹ️ Monitoreo sin activaciones.")
 
 if __name__ == '__main__':
-    executar_bot_maestro()
+    ejecutar_bot_maestro()
