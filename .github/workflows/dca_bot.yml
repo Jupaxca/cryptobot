@@ -1,8 +1,8 @@
-name: Bot DCA Crypto Diario (Telegram)
+name: Super Bot Cripto 24/7 (Core-Satellite)
 
 on:
   schedule:
-    - cron: '0 8 * * *' # Se ejecuta todos los días a las 8:00 AM UTC
+    - cron: '0 * * * *' # Se ejecuta automáticamente CADA HORA, las 24 horas del día
   workflow_dispatch: # Permite ejecutarlo manualmente desde la web cuando quieras
 
 jobs:
@@ -22,7 +22,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install ccxt pandas numpy requests
 
-      - name: Ejecutar el bot de DCA
+      - name: Ejecutar el Super Bot 24/7
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
