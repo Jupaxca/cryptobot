@@ -5,17 +5,19 @@ import os
 import requests
 
 # ==========================================================================
-# CONFIGURACIÓN DEL BOT DE SWING TRADING (Corto Plazo: 5 a 15 días)
+# CONFIGURACIÓN DEL SUPER BOT 24/7 (ESTRATEGIA CORE-SATELLITE)
 # ==========================================================================
-# Canasta optimizada con alta liquidez y volatilidad para rebotes rápidos
-SIMBOLOS = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'AVAX/USD', 'LINK/USD']
-TEMPORALIDAD = '1d'  # Velas diarias para señales más limpias
+# 1. BLOQUE CONSERVADOR (95%): Los gigantes de alta liquidez y refugio
+CORE_ASSETS = ['BTC/USD', 'ETH/USD', 'SOL/USD']
+
+# 2. BLOQUE DE ALTO RIESGO / POTENCIAL (5%): Altcoins dinámicas de alto volumen
+# El bot filtrará automáticamente las de mayor movimiento en el mercado.
+TEMPORALIDAD = '1d'
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 def calcular_rsi(series, period=14):
-    """Calcula el indicador técnico RSI para detectar sobreventa"""
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -36,65 +38,100 @@ def enviar_alerta_telegram(mensaje):
     try:
         response = requests.post(url, json=payload)
         if response.status_code == 200:
-            print("📱 Alerta de Swing Trading enviada a Telegram con éxito.")
+            print("📱 Alerta Core-Satellite enviada a Telegram con éxito.")
         else:
             print(f"❌ Error al enviar Telegram: {response.text}")
     except Exception as e:
         print(f"❌ Excepción en Telegram: {e}")
 
-def ejecutar_escaner_swing():
+def ejecutar_bot_inteligente():
     exchange = ccxt.kraken()
     print("="*60)
-    print(" INICIANDO ESCÁNER DE SWING TRADING (Corto Plazo + Gestión de Riesgo)")
+    print(" INICIANDO ESCÁNER 24/7 (ESTRATEGIA CORE-SATELLITE)")
     print("="*60)
     
-    oportunidades_detectadas = []
+    alertas_core = []
+    alertas_satelite = []
 
-    for simbolo in SIMBOLOS:
+    # --- ANÁLISIS DEL BLOQUE CONSERVADOR (95%) ---
+    print("\n🛡️ Analizando Bloque Conservador (Core)...")
+    for simbolo in CORE_ASSETS:
         try:
-            velas = exchange.fetch_ohlcv(simbolo, timeframe=TEMPORALIDAD, limit=100)
+            velas = exchange.fetch_ohlcv(simbolo, timeframe=TEMPORALIDAD, limit=50)
             if not velas or len(velas) < 30:
                 continue
-                
             df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
             df['RSI'] = calcular_rsi(df['cierre'], period=14)
             
-            precio_actual = df.iloc[-1]['cierre']
-            rsi_actual = df.iloc[-1]['RSI']
+            precio = df.iloc[-1]['cierre']
+            rsi = df.iloc[-1]['RSI']
+            print(f"  [Core] {simbolo:<10} | Precio: ${precio:,.2f} | RSI: {rsi:.1f}")
             
-            print(f"Activo: {simbolo:<10} | Precio: ${precio_actual:,.2f} | RSI(14): {rsi_actual:.1f}")
-            
-            # REGLA DE SWING TRADING: RSI menor a 35 (Zona de sobreventa profunda / rebote inminente)
-            if rsi_actual < 35:
-                # Definir objetivos de gestión de riesgo automáticos
-                take_profit = precio_actual * 1.07   # Meta: +7% de ganancia
-                stop_loss = precio_actual * 0.965    # Protección: -3.5% de pérdida máxima
-                
-                oportunidades_detectadas.append({
-                    'simbolo': simbolo,
-                    'precio': precio_actual,
-                    'rsi': rsi_actual,
-                    'tp': take_profit,
-                    'sl': stop_loss
-                })
+            # Regla conservadora: RSI bajo para acumulación segura en el núcleo
+            if rsi < 40:
+                alertas_core.append({'simbolo': simbolo, 'precio': precio, 'rsi': rsi})
         except Exception as e:
-            print(f"⚠️ Error procesando {simbolo}: {e}")
+            print(f"⚠️ Error en Core {simbolo}: {e}")
 
-    # Si hay oportunidades, armar el reporte detallado con TP y SL
-    if oportunidades_detectadas:
-        mensaje = "🚨 *¡SEÑAL DE SWING TRADING DETECTADA!* 🚨\n\n"
-        for op in oportunidades_detectadas:
-            mensaje += (
-                f"• *{op['simbolo']}*\n"
-                f"  Precio de Entrada: `${op['precio']:,.2f}`\n"
-                f"  RSI (14): `{op['rsi']:.1f}` (Zona de Rebote)\n"
-                f"  🎯 *Take Profit (+7%):* `${op['tp']:,.2f}`\n"
-                f"  🛑 *Stop Loss (-3.5%):* `${op['sl']:,.2f}`\n\n"
-            )
-        mensaje += "💡 _Operativa de corto plazo (5-15 días). Respeta siempre tu Stop-Loss._"
+    # --- ANÁLISIS DEL BLOQUE DE ALTO RIESGO / SATÉLITE (5%) ---
+    print("\n🚀 Analizando Bloque de Alto Riesgo (Satélite)...")
+    try:
+        tickers = exchange.fetch_tickers()
+        # Filtrar pares contra USD con buen volumen diario en Kraken
+        altcoins_candidatas = []
+        for s, ticker in tickers.items():
+            if '/USD' in s and s not in CORE_ASSETS and 'USDT' not in s and 'USDC' not in s:
+                volumen_usd = ticker.get('quoteVolume', 0)
+                if volumen_usd and volumen_usd > 1000000: # Al menos 1M USD de volumen diario
+                    altcoins_candidatas.append((s, volumen_usd))
+        
+        # Ordenar por mayor volumen de negociación y tomar los primeros 5 más activos
+        altcoins_candidatas.sort(key=lambda x: x[1], reverse=True)
+        top_altcoins = [item[0] for item in altcoins_candidatas[:5]]
+        
+        for simbolo in top_altcoins:
+            velas = exchange.fetch_ohlcv(simbolo, timeframe=TEMPORALIDAD, limit=50)
+            if not velas or len(velas) < 30:
+                continue
+            df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+            df['RSI'] = calcular_rsi(df['cierre'], period=14)
+            
+            precio = df.iloc[-1]['cierre']
+            rsi = df.iloc[-1]['RSI']
+            print(f"  [Satélite] {simbolo:<10} | Precio: ${precio:,.2f} | RSI: {rsi:.1f}")
+            
+            # Regla agresiva de corto plazo: Sobreventa fuerte (RSI < 32) para buscar rebotes rápidos
+            if rsi < 32:
+                tp = precio * 1.08   # Take Profit +8%
+                sl = precio * 0.95   # Stop Loss -5% (mayor margen por volatilidad)
+                alertas_satelite.append({'simbolo': simbolo, 'precio': precio, 'rsi': rsi, 'tp': tp, 'sl': sl})
+    except Exception as e:
+        print(f"⚠️ Error analizando satélites: {e}")
+
+    # --- CONSTRUCCIÓN DEL MENSAJE DE TELEGRAM ---
+    if alertas_core or alertas_satelite:
+        mensaje = "🚨 *REPORTE TÁCTICO DE MERCADO (24/7)* 🚨\n\n"
+        
+        if alertas_core:
+            mensaje += "🛡️ *BLOQUE CONSERVADOR (95% - Núcleo)*\n"
+            for op in alertas_core:
+                mensaje += f"• *{op['simbolo']}* | Precio: `${op['precio']:,.2f}` | RSI: `{op['rsi']:.1f}` (Zona de Acumulación Segura)\n"
+            mensaje += "\n"
+            
+        if alertas_satelite:
+            mensaje += "🚀 *BLOQUE DE ALTO RIESGO / POTENCIAL (5% - Satélite)*\n"
+            for op in alertas_satelite:
+                mensaje += (
+                    f"• *{op['simbolo']}*\n"
+                    f"  Entrada: `${op['precio']:,.2f}` | RSI: `{op['rsi']:.1f}`\n"
+                    f"  🎯 *Take Profit (+8%):* `${op['tp']:,.2f}`\n"
+                    f"  🛑 *Stop Loss (-5%):* `${op['sl']:,.2f}`\n\n"
+                )
+        
+        mensaje += "💡 _Ejecución autónoma horaria._"
         enviar_alerta_telegram(mensaje)
     else:
-        print("\nℹ️ Ningún activo está en zona de sobreventa estricta hoy. Esperando el momento ideal.")
+        print("\nℹ️ Monitoreo 24/7 exitoso. Ningún activo cumple criterios estrictos en este ciclo horario.")
 
 if __name__ == '__main__':
-    ejecutar_escaner_swing()
+    ejecutar_bot_inteligente()
