@@ -6,8 +6,8 @@ import json
 import requests
 from datetime import datetime, timezone
 from sklearn.cluster import KMeans
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+from xgboost import XGBClassifier
 
 # ==========================================================================
 # 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO
@@ -146,7 +146,7 @@ def es_mercado_spot_valido(exchange, simbolo):
     return mercado and mercado.get('spot', False) is True and mercado.get('type', 'spot') == 'spot'
 
 # ==========================================================================
-# 3. MÓDULOS DE MACHINE LEARNING (IA)
+# 3. MÓDULOS DE MACHINE LEARNING (IA AVANZADA)
 # ==========================================================================
 def detectar_regimen_kmeans(df_btc):
     """ Clustering no supervisado para definir el entorno del mercado macro """
@@ -164,17 +164,16 @@ def detectar_regimen_kmeans(df_btc):
         kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
         data['cluster'] = kmeans.fit_predict(X_scaled)
         
-        # Inferencia de régimen ordenando los centroides por tendencia media
         medias = data.groupby('cluster')['tendencia'].mean().sort_values()
         mapa_regimenes = {medias.index[0]: 'BAJISTA', medias.index[1]: 'LATERAL', medias.index[2]: 'ALCISTA'}
         
         return mapa_regimenes[data['cluster'].iloc[-1]]
     except Exception as e: 
         print(f"⚠️ Error en K-Means: {e}")
-        return "LATERAL" # Fallback conservador
+        return "LATERAL"
 
-def inferir_probabilidad_rf(df):
-    """ Random Forest para predecir éxito basado en variables independientes """
+def inferir_probabilidad_xgboost(df):
+    """ XGBoost calibrado institucionalmente para predecir éxito de señales """
     try:
         df_ml = df.copy()
         df_ml['retorno_futuro'] = df_ml['cierre'].shift(-HORIZONTE_VALIDACION) / df_ml['cierre'] - 1
@@ -188,14 +187,23 @@ def inferir_probabilidad_rf(df):
         
         if len(X) < 50 or y.nunique() < 2: return None
         
-        rf = RandomForestClassifier(n_estimators=100, max_depth=3, random_state=42)
-        rf.fit(X, y)
+        xgb_model = XGBClassifier(
+            n_estimators=100,
+            max_depth=3,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            eval_metric='logloss',
+            use_label_encoder=False
+        )
+        xgb_model.fit(X, y)
         
         X_actual = df_ml.iloc[-1:][features]
-        prob_exito = rf.predict_proba(X_actual)[0][1] * 100
+        prob_exito = xgb_model.predict_proba(X_actual)[0][1] * 100
         return prob_exito
     except Exception as e: 
-        print(f"⚠️ Error en Random Forest: {e}")
+        print(f"⚠️ Error en XGBoost: {e}")
         return None
 
 # ==========================================================================
@@ -282,7 +290,7 @@ def ejecutar_bot_maestro():
             alertas_seguimiento.append(r)
             estado_nuevo[s] = r['accion']
 
-    # --- Satélite (Híbrido + IA) ---
+    # --- Satélite (Híbrido + IA XGBoost) ---
     if regimen_macro in ["ALCISTA", "LATERAL"]:
         try:
             tickers = exchange.fetch_tickers()
@@ -313,20 +321,20 @@ def ejecutar_bot_maestro():
                 if cuantitativo_ok:
                     sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
                     val = validar_senal_historica(df, (df['RSI'] <= SATELITE_RSI_ENTRADA) & (df['cierre'] <= df['BB_Lower'] * 1.01))
-                    prob_ml = inferir_probabilidad_rf(df)
+                    prob_ml = inferir_probabilidad_xgboost(df)
                     
                     alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'CUANTITATIVO_REVERSION', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_ml': prob_ml})
                     estado_nuevo[s] = 'CUANTITATIVO_REVERSION'
                 elif breakout_ok:
                     sl, tp = ultima['cierre'] - (1.5 * ultima['ATR']), ultima['cierre'] + (3.0 * ultima['ATR'])
                     val = validar_senal_historica(df, (df['cierre'] > df['cierre'].shift(1).rolling(20).max()) & (df['volumen'] >= df['Vol_Medio'] * 1.5))
-                    prob_ml = inferir_probabilidad_rf(df)
+                    prob_ml = inferir_probabilidad_xgboost(df)
 
                     alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'BREAKOUT_MOMENTUM', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_ml': prob_ml})
                     estado_nuevo[s] = 'BREAKOUT_MOMENTUM'
                 elif patron_smc:
                     val_smc = validar_senal_historica(df, hist_alc if patron_smc['tipo'] == "SMC_ALCISTA" else hist_baj)
-                    prob_ml = inferir_probabilidad_rf(df)
+                    prob_ml = inferir_probabilidad_xgboost(df)
                     
                     alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': patron_smc['tipo'], 'tp': patron_smc['tp'], 'sl': patron_smc['sl'], 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - patron_smc['sl']), 0.0001), 'validacion': val_smc, 'prob_ml': prob_ml})
                     estado_nuevo[s] = patron_smc['tipo']
@@ -357,7 +365,7 @@ def ejecutar_bot_maestro():
                 msj += f"{emoji} *{o['tipo_alerta'].replace('_', ' ')}* | *{o['simbolo']}*\n  Entrada: `${o['precio']:,.4f}`\n  🎯 TP: `${o['tp']:,.4f}` | 🛑 SL: `${o['sl']:,.4f}`\n  📏 Tamaño sugerido: `{o['sugerencia_tamano']:,.2f}` UND\n"
                 
                 if o.get('prob_ml') is not None:
-                    msj += f"  🤖 *Probabilidad IA (RF):* `{o['prob_ml']:.1f}% éxito`\n"
+                    msj += f"  🤖 *Probabilidad IA (XGBoost):* `{o['prob_ml']:.1f}% éxito`\n"
                     
                 if o['validacion'] and o['validacion']['suficiente']:
                     msj += f"  📊 Histórico: Win Rate {o['validacion']['win_rate']:.0f}%, Promedio {o['validacion']['retorno_promedio']:+.1f}%\n"
