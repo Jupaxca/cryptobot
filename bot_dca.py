@@ -5,6 +5,9 @@ import os
 import json
 import requests
 from datetime import datetime, timezone
+from sklearn.cluster import KMeans
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
 
 # ==========================================================================
 # 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO
@@ -17,7 +20,7 @@ TEMPORALIDAD_NUCLEO = '1d'
 NIVEL_CRECIMIENTO = ['SOL/USD', 'LINK/USD', 'AVAX/USD']
 TEMPORALIDAD_CRECIMIENTO = '1d'
 
-# --- Seguimiento Estratégico: XRP, NEAR, ADA, POL y SUI (Seguimiento continuo para Excel) ---
+# --- Seguimiento Estratégico: XRP, NEAR, ADA, POL y SUI ---
 SEGUIMIENTO_ESTRATEGICO = ['XRP/USD', 'NEAR/USD', 'ADA/USD', 'POL/USD', 'SUI/USD']
 TEMPORALIDAD_SEGUIMIENTO = '1d'
 
@@ -43,7 +46,7 @@ RIESGO_POR_TRADE = 0.01      # 1% de riesgo por trade
 HORIZONTE_VALIDACION = 14
 
 # ==========================================================================
-# 2. DESCARGA Y PROCESAMIENTO
+# 2. DESCARGA Y PROCESAMIENTO TÉCNICO
 # ==========================================================================
 def descargar_velas_cerradas(exchange, simbolo, temporalidad, limit):
     try:
@@ -143,7 +146,60 @@ def es_mercado_spot_valido(exchange, simbolo):
     return mercado and mercado.get('spot', False) is True and mercado.get('type', 'spot') == 'spot'
 
 # ==========================================================================
-# 3. TELEGRAM Y ESTADO
+# 3. MÓDULOS DE MACHINE LEARNING (IA)
+# ==========================================================================
+def detectar_regimen_kmeans(df_btc):
+    """ Clustering no supervisado para definir el entorno del mercado macro """
+    if len(df_btc) < 50: return "DESCONOCIDO"
+    try:
+        data = pd.DataFrame(index=df_btc.index)
+        data['rendimiento'] = df_btc['cierre'].pct_change()
+        data['volatilidad'] = df_btc['maximo'] - df_btc['minimo']
+        data['tendencia'] = df_btc['cierre'] / df_btc['cierre'].rolling(50).mean() - 1
+        data = data.dropna()
+        
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(data)
+        
+        kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+        data['cluster'] = kmeans.fit_predict(X_scaled)
+        
+        # Inferencia de régimen ordenando los centroides por tendencia media
+        medias = data.groupby('cluster')['tendencia'].mean().sort_values()
+        mapa_regimenes = {medias.index[0]: 'BAJISTA', medias.index[1]: 'LATERAL', medias.index[2]: 'ALCISTA'}
+        
+        return mapa_regimenes[data['cluster'].iloc[-1]]
+    except Exception as e: 
+        print(f"⚠️ Error en K-Means: {e}")
+        return "LATERAL" # Fallback conservador
+
+def inferir_probabilidad_rf(df):
+    """ Random Forest para predecir éxito basado en variables independientes """
+    try:
+        df_ml = df.copy()
+        df_ml['retorno_futuro'] = df_ml['cierre'].shift(-HORIZONTE_VALIDACION) / df_ml['cierre'] - 1
+        df_ml['exito'] = (df_ml['retorno_futuro'] > 0).astype(int)
+        
+        features = ['RSI', 'ATR', 'ADX', 'volumen']
+        df_ml = df_ml.dropna(subset=features)
+        
+        X = df_ml[:-HORIZONTE_VALIDACION][features]
+        y = df_ml[:-HORIZONTE_VALIDACION]['exito']
+        
+        if len(X) < 50 or y.nunique() < 2: return None
+        
+        rf = RandomForestClassifier(n_estimators=100, max_depth=3, random_state=42)
+        rf.fit(X, y)
+        
+        X_actual = df_ml.iloc[-1:][features]
+        prob_exito = rf.predict_proba(X_actual)[0][1] * 100
+        return prob_exito
+    except Exception as e: 
+        print(f"⚠️ Error en Random Forest: {e}")
+        return None
+
+# ==========================================================================
+# 4. TELEGRAM Y ESTADO
 # ==========================================================================
 def enviar_alerta_telegram(mensaje):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
@@ -164,7 +220,7 @@ def guardar_estado(estado):
     with open(ESTADO_PATH, 'w') as f: json.dump(estado, f, indent=2)
 
 # ==========================================================================
-# 4. ANÁLISIS DE ACTIVOS
+# 5. ANÁLISIS DE ACTIVOS
 # ==========================================================================
 def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, rsi_compra, rsi_venta, sobreprecio_pct, es_crecimiento=False):
     velas = descargar_velas_cerradas(exchange, simbolo, temporalidad, VELAS_ANALISIS)
@@ -193,7 +249,7 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
     return {'simbolo': simbolo, 'precio': precio, 'rsi': rsi, 'media_30': media_30, 'accion': accion, 'etiqueta': etiqueta, 'validacion': validacion, 'sugerencia_tamano': sugerencia_tamano, 'atr': atr}
 
 # ==========================================================================
-# 5. BOT MAESTRO
+# 6. BOT MAESTRO
 # ==========================================================================
 def ejecutar_bot_maestro():
     exchange = ccxt.kraken({'enableRateLimit': True, 'timeout': 30000})
@@ -201,35 +257,35 @@ def ejecutar_bot_maestro():
     estado_anterior, estado_nuevo = cargar_estado(), {}
     alertas_nucleo, alertas_crecimiento, alertas_seguimiento, alertas_satelite = [], [], [], []
 
+    # Detección de Régimen con ML
     velas_btc = descargar_velas_cerradas(exchange, 'BTC/USD', TEMPORALIDAD_ESCUDO, VELAS_ESCUDO_BTC)
-    btc_saludable = False
+    regimen_macro = "DESCONOCIDO"
     if velas_btc:
         df_btc = pd.DataFrame(velas_btc, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
-        btc_saludable = df_btc.iloc[-1]['cierre'] >= df_btc['cierre'].rolling(50).mean().iloc[-1]
+        regimen_macro = detectar_regimen_kmeans(df_btc)
 
-    # --- Núcleo Conservador ---
+    print(f"🧠 Régimen Macro detectado por K-Means: {regimen_macro}")
+
+    # --- Bloques Base ---
     for s in NUCLEO_CONSERVADOR:
         if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_NUCLEO, 0.04, 40, 75, 0.05, False):
             alertas_nucleo.append(r)
             estado_nuevo[s] = r['accion']
 
-    # --- Nivel Crecimiento (SOL, LINK, AVAX) ---
     for s in NIVEL_CRECIMIENTO:
         if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_CRECIMIENTO, 0.07, 35, 80, 0.08, True):
             alertas_crecimiento.append(r)
             estado_nuevo[s] = r['accion']
 
-    # --- Seguimiento Estratégico (XRP, NEAR, ADA, POL, SUI) ---
     for s in SEGUIMIENTO_ESTRATEGICO:
         if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_SEGUIMIENTO, 0.06, 35, 78, 0.07, True):
             alertas_seguimiento.append(r)
             estado_nuevo[s] = r['accion']
 
-    # --- Satélite de Alto Riesgo (Híbrido en 4h) ---
-    if btc_saludable:
+    # --- Satélite (Híbrido + IA) ---
+    if regimen_macro in ["ALCISTA", "LATERAL"]:
         try:
             tickers = exchange.fetch_tickers()
-            # Excluimos todas las fijas de los bloques anteriores para evitar duplicidad
             excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_CRECIMIENTO) | set(SEGUIMIENTO_ESTRATEGICO)
             candidatas = sorted([s for s, t in tickers.items() if '/USD' in s and s not in excluidos and 'USDT' not in s and es_mercado_spot_valido(exchange, s) and t.get('quoteVolume', 0) > 1000000], key=lambda s: tickers[s].get('quoteVolume', 0), reverse=True)[:10]
 
@@ -246,29 +302,33 @@ def ejecutar_bot_maestro():
                 
                 patron_smc, hist_alc, hist_baj = detectar_patrones_smc_hist(df)
                 
-                cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['volumen'] >= ultima['Vol_Medio'] * 0.7 and ultima['ADX'] < SATELITE_ADX_MAX and ultima['cierre'] > ultima['EMA_TENDENCIA'])
-                breakout_ok = (ultima['cierre'] > ultima['Max_20']) and (ultima['volumen'] >= ultima['Vol_Medio'] * 1.5) and (ultima['ADX'] > 25)
+                # Reglas adaptativas basadas en el Régimen
+                if regimen_macro == "LATERAL":
+                    cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['volumen'] >= ultima['Vol_Medio'] * 0.7)
+                    breakout_ok = False # En lateral se apagan las rupturas
+                else: # ALCISTA
+                    cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['ADX'] < SATELITE_ADX_MAX)
+                    breakout_ok = (ultima['cierre'] > ultima['Max_20']) and (ultima['volumen'] >= ultima['Vol_Medio'] * 1.5) and (ultima['ADX'] > 25)
 
                 if cuantitativo_ok:
                     sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
                     val = validar_senal_historica(df, (df['RSI'] <= SATELITE_RSI_ENTRADA) & (df['cierre'] <= df['BB_Lower'] * 1.01))
-                    sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001)
+                    prob_ml = inferir_probabilidad_rf(df)
                     
-                    alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'rsi': ultima['RSI'], 'tipo_alerta': 'CUANTITATIVO_REVERSION', 'tp': tp, 'sl': sl, 'sugerencia_tamano': sugerencia_tamano, 'validacion': val})
+                    alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'CUANTITATIVO_REVERSION', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_ml': prob_ml})
                     estado_nuevo[s] = 'CUANTITATIVO_REVERSION'
                 elif breakout_ok:
-                    sl = ultima['cierre'] - (1.5 * ultima['ATR'])
-                    tp = ultima['cierre'] + (3.0 * ultima['ATR'])
+                    sl, tp = ultima['cierre'] - (1.5 * ultima['ATR']), ultima['cierre'] + (3.0 * ultima['ATR'])
                     val = validar_senal_historica(df, (df['cierre'] > df['cierre'].shift(1).rolling(20).max()) & (df['volumen'] >= df['Vol_Medio'] * 1.5))
-                    sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001)
+                    prob_ml = inferir_probabilidad_rf(df)
 
-                    alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'rsi': ultima['RSI'], 'tipo_alerta': 'BREAKOUT_MOMENTUM', 'tp': tp, 'sl': sl, 'sugerencia_tamano': sugerencia_tamano, 'validacion': val})
+                    alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'BREAKOUT_MOMENTUM', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_ml': prob_ml})
                     estado_nuevo[s] = 'BREAKOUT_MOMENTUM'
                 elif patron_smc:
                     val_smc = validar_senal_historica(df, hist_alc if patron_smc['tipo'] == "SMC_ALCISTA" else hist_baj)
-                    sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - patron_smc['sl']), 0.0001)
+                    prob_ml = inferir_probabilidad_rf(df)
                     
-                    alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'rsi': ultima['RSI'], 'tipo_alerta': patron_smc['tipo'], 'tp': patron_smc['tp'], 'sl': patron_smc['sl'], 'sugerencia_tamano': sugerencia_tamano, 'validacion': val_smc})
+                    alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': patron_smc['tipo'], 'tp': patron_smc['tp'], 'sl': patron_smc['sl'], 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - patron_smc['sl']), 0.0001), 'validacion': val_smc, 'prob_ml': prob_ml})
                     estado_nuevo[s] = patron_smc['tipo']
         except Exception as e:
             print(f"⚠️ Error procesando el bloque satélite: {e}")
@@ -282,22 +342,27 @@ def ejecutar_bot_maestro():
     s_env = [a for a in alertas_satelite if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], a['tipo_alerta'])]
 
     if n_env or c_env or seg_env or s_env:
-        msj = f"🚨 *REPORTE DE INVERSIÓN (MULTI-BLOQUE)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+        msj = f"🚨 *REPORTE IA (MULTI-BLOQUE)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+        msj += f"🌐 *Régimen Macro:* `{regimen_macro}`\n\n"
         if n_env:
             msj += "🛡️ *NÚCLEO CONSERVADOR*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in n_env]) + "\n"
         if c_env:
-            msj += "🚀 *CRECIMIENTO PRINCIPAL (SOL/LINK/AVAX)*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in c_env]) + "\n"
+            msj += "🚀 *CRECIMIENTO PRINCIPAL*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in c_env]) + "\n"
         if seg_env:
-            msj += "📊 *SEGUIMIENTO ESTRATÉGICO (XRP/NEAR/ADA/POL/SUI)*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.4f}`\n  {o['etiqueta']}\n" for o in seg_env]) + "\n"
+            msj += "📊 *SEGUIMIENTO ESTRATÉGICO*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.4f}`\n  {o['etiqueta']}\n" for o in seg_env]) + "\n"
         if s_env:
             msj += f"🎯 *RADAR DE ALTO RIESGO ({TEMPORALIDAD_SATELITE})*\n"
             for o in s_env:
                 emoji = '🟢' if 'ALCISTA' in o['tipo_alerta'] or 'REVERSION' in o['tipo_alerta'] or 'BREAKOUT' in o['tipo_alerta'] else '🔴'
                 msj += f"{emoji} *{o['tipo_alerta'].replace('_', ' ')}* | *{o['simbolo']}*\n  Entrada: `${o['precio']:,.4f}`\n  🎯 TP: `${o['tp']:,.4f}` | 🛑 SL: `${o['sl']:,.4f}`\n  📏 Tamaño sugerido: `{o['sugerencia_tamano']:,.2f}` UND\n"
+                
+                if o.get('prob_ml') is not None:
+                    msj += f"  🤖 *Probabilidad IA (RF):* `{o['prob_ml']:.1f}% éxito`\n"
+                    
                 if o['validacion'] and o['validacion']['suficiente']:
-                    msj += f"  📊 Validado ({o['validacion']['n_casos']} casos): Win Rate {o['validacion']['win_rate']:.0f}%, Promedio {o['validacion']['retorno_promedio']:+.1f}%\n"
+                    msj += f"  📊 Histórico: Win Rate {o['validacion']['win_rate']:.0f}%, Promedio {o['validacion']['retorno_promedio']:+.1f}%\n"
                 msj += "\n"
-        msj += "_⚠️ Herramienta de apoyo analítico. No constituye asesoría financiera personalizada. Verifique siempre antes de operar._"
+        msj += "_⚠️ Herramienta de apoyo analítico basada en IA. Verifique siempre antes de operar._"
         enviar_alerta_telegram(msj)
     
     guardar_estado(estado_nuevo)
