@@ -8,5 +8,6 @@
   "NEAR/USD": "ESPERAR",
   "ADA/USD": "NEUTRO",
   "POL/USD": "NEUTRO",
-  "SUI/USD": "NEUTRO"
+  "SUI/USD": "NEUTRO",
+  "PUMP/USD": "SMC_ALCISTA"
 }
