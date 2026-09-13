@@ -2,18 +2,21 @@ name: Super Bot Cripto 24/7 (Core-Satellite)
 
 on:
   schedule:
-    - cron: '0 * * * *' # Se ejecuta automáticamente CADA HORA, las 24 horas del día
+    - cron: '5 3,7,11,15,19,23 * * *' # Ejecuta 5 minutos después del cierre oficial de las velas de 4h
   workflow_dispatch: # Permite ejecutarlo manualmente desde la web cuando quieras
+
+permissions:
+  contents: write
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout al repositorio
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Configurar Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -28,3 +31,11 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python bot_dca.py
+
+      - name: Persistir estado (Evitar Spam en Telegram)
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add bot_estado.json
+          git commit -m "update: persistencia automatica del estado del bot" || echo "Sin cambios de estado"
+          git push
