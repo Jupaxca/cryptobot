@@ -7,14 +7,21 @@ import requests
 from datetime import datetime, timezone
 
 # ==========================================================================
-# 1. CONFIGURACIÓN GENERAL
+# 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO
 # ==========================================================================
+# --- Núcleo Conservador: Base del portafolio (Baja volatilidad relativa) ---
 NUCLEO_CONSERVADOR = ['BTC/USD', 'ETH/USD']
 TEMPORALIDAD_NUCLEO = '1d'
 
+# --- Nivel Crecimiento y Alto Potencial: Proyectos principales ---
 NIVEL_CRECIMIENTO = ['SOL/USD', 'LINK/USD', 'AVAX/USD']
 TEMPORALIDAD_CRECIMIENTO = '1d'
 
+# --- Seguimiento Estratégico: XRP, NEAR, ADA, POL y SUI (Seguimiento continuo para Excel) ---
+SEGUIMIENTO_ESTRATEGICO = ['XRP/USD', 'NEAR/USD', 'ADA/USD', 'POL/USD', 'SUI/USD']
+TEMPORALIDAD_SEGUIMIENTO = '1d'
+
+# --- Satélite de Alto Riesgo (5%): Swing trading dinámico en 4h ---
 TEMPORALIDAD_SATELITE = '4h'
 SATELITE_RSI_ENTRADA = 25
 SATELITE_ADX_MAX = 20
@@ -192,7 +199,7 @@ def ejecutar_bot_maestro():
     exchange = ccxt.kraken({'enableRateLimit': True, 'timeout': 30000})
     exchange.load_markets()
     estado_anterior, estado_nuevo = cargar_estado(), {}
-    alertas_nucleo, alertas_crecimiento, alertas_satelite = [], [], []
+    alertas_nucleo, alertas_crecimiento, alertas_seguimiento, alertas_satelite = [], [], [], []
 
     velas_btc = descargar_velas_cerradas(exchange, 'BTC/USD', TEMPORALIDAD_ESCUDO, VELAS_ESCUDO_BTC)
     btc_saludable = False
@@ -200,22 +207,30 @@ def ejecutar_bot_maestro():
         df_btc = pd.DataFrame(velas_btc, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
         btc_saludable = df_btc.iloc[-1]['cierre'] >= df_btc['cierre'].rolling(50).mean().iloc[-1]
 
-    # --- Núcleo y Crecimiento ---
+    # --- Núcleo Conservador ---
     for s in NUCLEO_CONSERVADOR:
         if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_NUCLEO, 0.04, 40, 75, 0.05, False):
             alertas_nucleo.append(r)
             estado_nuevo[s] = r['accion']
 
+    # --- Nivel Crecimiento ---
     for s in NIVEL_CRECIMIENTO:
         if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_CRECIMIENTO, 0.07, 35, 80, 0.08, True):
             alertas_crecimiento.append(r)
             estado_nuevo[s] = r['accion']
 
-    # --- Satélite (Híbrido: Reversión a la Media + Breakout de Volumen) ---
+    # --- Seguimiento Estratégico (XRP, NEAR, ADA, POL, SUI) ---
+    for s in SEGUIMIENTO_ESTRATEGICO:
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_SEGUIMIENTO, 0.06, 35, 78, 0.07, True):
+            alertas_seguimiento.append(r)
+            estado_nuevo[s] = r['accion']
+
+    # --- Satélite de Alto Riesgo (Híbrido en 4h) ---
     if btc_saludable:
         try:
             tickers = exchange.fetch_tickers()
-            excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_CRECIMIENTO)
+            # Excluimos todas las fijas de los bloques anteriores para evitar duplicidad
+            excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_CRECIMIENTO) | set(SEGUIMIENTO_ESTRATEGICO)
             candidatas = sorted([s for s, t in tickers.items() if '/USD' in s and s not in excluidos and 'USDT' not in s and es_mercado_spot_valido(exchange, s) and t.get('quoteVolume', 0) > 1000000], key=lambda s: tickers[s].get('quoteVolume', 0), reverse=True)[:10]
 
             for s in candidatas:
@@ -225,23 +240,19 @@ def ejecutar_bot_maestro():
                 df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
                 df['RSI'], _, df['BB_Lower'] = calcular_rsi(df['cierre'], 14), None, calcular_bollinger_bands(df['cierre'])[2]
                 df['Vol_Medio'], df['ATR'], df['ADX'], df['EMA_TENDENCIA'] = df['volumen'].rolling(20).mean(), calcular_atr(df, 14), calcular_adx(df, 14), df['cierre'].ewm(span=200, adjust=False).mean()
-                df['Max_20'] = df['cierre'].shift(1).rolling(20).max() # Máximo de los últimos 20 periodos para Breakout
+                df['Max_20'] = df['cierre'].shift(1).rolling(20).max()
                 df = df.dropna().reset_index(drop=True)
                 ultima = df.iloc[-1]
                 
                 patron_smc, hist_alc, hist_baj = detectar_patrones_smc_hist(df)
                 
-                # Estrategia 1: Reversión a la Media (Mean Reversion / Sobreventa)
                 cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['volumen'] >= ultima['Vol_Medio'] * 0.7 and ultima['ADX'] < SATELITE_ADX_MAX and ultima['cierre'] > ultima['EMA_TENDENCIA'])
-
-                # Estrategia 2: Ruptura de Rango con Volumen (Breakout / Momentum - Infografía)
-                breakout_ok = (ultima['cierre > Max_20'] if 'cierre > Max_20' in df.columns else ultima['cierre'] > ultima['Max_20']) and (ultima['volumen'] >= ultima['Vol_Medio'] * 1.5) and (ultima['ADX'] > 25)
+                breakout_ok = (ultima['cierre'] > ultima['Max_20']) and (ultima['volumen'] >= ultima['Vol_Medio'] * 1.5) and (ultima['ADX'] > 25)
 
                 if cuantitativo_ok:
                     sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
                     val = validar_senal_historica(df, (df['RSI'] <= SATELITE_RSI_ENTRADA) & (df['cierre'] <= df['BB_Lower'] * 1.01))
-                    denominador_riesgo = max(abs(ultima['cierre'] - sl), 0.0001)
-                    sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / denominador_riesgo
+                    sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001)
                     
                     alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'rsi': ultima['RSI'], 'tipo_alerta': 'CUANTITATIVO_REVERSION', 'tp': tp, 'sl': sl, 'sugerencia_tamano': sugerencia_tamano, 'validacion': val})
                     estado_nuevo[s] = 'CUANTITATIVO_REVERSION'
@@ -249,15 +260,13 @@ def ejecutar_bot_maestro():
                     sl = ultima['cierre'] - (1.5 * ultima['ATR'])
                     tp = ultima['cierre'] + (3.0 * ultima['ATR'])
                     val = validar_senal_historica(df, (df['cierre'] > df['cierre'].shift(1).rolling(20).max()) & (df['volumen'] >= df['Vol_Medio'] * 1.5))
-                    denominador_riesgo = max(abs(ultima['cierre'] - sl), 0.0001)
-                    sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / denominador_riesgo
+                    sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001)
 
                     alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'rsi': ultima['RSI'], 'tipo_alerta': 'BREAKOUT_MOMENTUM', 'tp': tp, 'sl': sl, 'sugerencia_tamano': sugerencia_tamano, 'validacion': val})
                     estado_nuevo[s] = 'BREAKOUT_MOMENTUM'
                 elif patron_smc:
                     val_smc = validar_senal_historica(df, hist_alc if patron_smc['tipo'] == "SMC_ALCISTA" else hist_baj)
-                    denominador_riesgo = max(abs(ultima['cierre'] - patron_smc['sl']), 0.0001)
-                    sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / denominador_riesgo
+                    sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - patron_smc['sl']), 0.0001)
                     
                     alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'rsi': ultima['RSI'], 'tipo_alerta': patron_smc['tipo'], 'tp': patron_smc['tp'], 'sl': patron_smc['sl'], 'sugerencia_tamano': sugerencia_tamano, 'validacion': val_smc})
                     estado_nuevo[s] = patron_smc['tipo']
@@ -267,14 +276,19 @@ def ejecutar_bot_maestro():
     hubo_cambio = lambda s, a: estado_anterior.get(s) != a
     filtrar = lambda l, c: [a for a in l if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], a.get('accion', c))]
     
-    n_env, c_env, s_env = filtrar(alertas_nucleo, None), filtrar(alertas_crecimiento, None), [a for a in alertas_satelite if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], a['tipo_alerta'])]
+    n_env = filtrar(alertas_nucleo, None)
+    c_env = filtrar(alertas_crecimiento, None)
+    seg_env = filtrar(alertas_seguimiento, None)
+    s_env = [a for a in alertas_satelite if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], a['tipo_alerta'])]
 
-    if n_env or c_env or s_env:
-        msj = f"🚨 *REPORTE DE INVERSIÓN (HÍBRIDO)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+    if n_env or c_env or seg_env or s_env:
+        msj = f"🚨 *REPORTE DE INVERSIÓN (MULTI-BLOQUE)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
         if n_env:
             msj += "🛡️ *NÚCLEO CONSERVADOR*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in n_env]) + "\n"
         if c_env:
-            msj += "🚀 *CRECIMIENTO Y ALTO POTENCIAL*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in c_env]) + "\n"
+            msj += "🚀 *CRECIMIENTO PRINCIPAL*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in c_env]) + "\n"
+        if seg_env:
+            msj += "📊 *SEGUIMIENTO ESTRATÉGICO (XRP/NEAR/ADA/POL/SUI)*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.4f}`\n  {o['etiqueta']}\n" for o in seg_env]) + "\n"
         if s_env:
             msj += f"🎯 *RADAR DE ALTO RIESGO ({TEMPORALIDAD_SATELITE})*\n"
             for o in s_env:
