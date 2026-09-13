@@ -213,7 +213,7 @@ def ejecutar_bot_maestro():
             alertas_nucleo.append(r)
             estado_nuevo[s] = r['accion']
 
-    # --- Nivel Crecimiento ---
+    # --- Nivel Crecimiento (SOL, LINK, AVAX) ---
     for s in NIVEL_CRECIMIENTO:
         if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_CRECIMIENTO, 0.07, 35, 80, 0.08, True):
             alertas_crecimiento.append(r)
@@ -286,7 +286,7 @@ def ejecutar_bot_maestro():
         if n_env:
             msj += "🛡️ *NÚCLEO CONSERVADOR*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in n_env]) + "\n"
         if c_env:
-            msj += "🚀 *CRECIMIENTO PRINCIPAL*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in c_env]) + "\n"
+            msj += "🚀 *CRECIMIENTO PRINCIPAL (SOL/LINK/AVAX)*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in c_env]) + "\n"
         if seg_env:
             msj += "📊 *SEGUIMIENTO ESTRATÉGICO (XRP/NEAR/ADA/POL/SUI)*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.4f}`\n  {o['etiqueta']}\n" for o in seg_env]) + "\n"
         if s_env:
