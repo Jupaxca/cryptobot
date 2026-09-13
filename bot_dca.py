@@ -80,7 +80,6 @@ def calcular_adx(df, period=14):
     return dx.replace([np.inf, -np.inf], np.nan).rolling(period).mean()
 
 def detectar_patrones_smc_hist(df):
-    """ Separa la lógica histórica (sin look-ahead) de la señal en vivo """
     senales_alcistas = np.zeros(len(df), dtype=bool)
     senales_bajistas = np.zeros(len(df), dtype=bool)
     ultima_senal = None
@@ -88,8 +87,6 @@ def detectar_patrones_smc_hist(df):
     if len(df) < 20: return ultima_senal, senales_alcistas, senales_bajistas
 
     for i in range(15, len(df)):
-        # Verificamos si en la vela 'i' o en su entorno cercano ocurrió un FVG con mitigación local
-        # Usamos una ventana estricta para el histórico sin mirar el final absoluto del DataFrame
         if i < len(df) - 1:
             if df['minimo'].iloc[i] > df['maximo'].iloc[i-2]:
                 if df['minimo'].iloc[i] and df['cierre'].iloc[i] >= df['maximo'].iloc[i-2]:
@@ -103,7 +100,6 @@ def detectar_patrones_smc_hist(df):
                     if df['maximo'].iloc[max(0, i-4):i].max() == max_sweep:
                         senales_bajistas[i] = True
 
-    # Señal en vivo evaluada estrictamente en la última vela cerrada
     i_live = len(df) - 2
     if i_live >= 15:
         if df['minimo'].iloc[i_live] > df['maximo'].iloc[i_live-2]:
@@ -184,7 +180,6 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
     else:
         accion, etiqueta, validacion = "NEUTRO", f"{prefijo}⚪ *ZONA NEUTRA:* Mercado estable.", None
 
-    # Blindaje matemático en el denominador para evitar divisiones por cero o valores absurdos
     denominador_atr = max(atr * 2.5, 0.0001)
     sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / denominador_atr
 
@@ -216,7 +211,7 @@ def ejecutar_bot_maestro():
             alertas_crecimiento.append(r)
             estado_nuevo[s] = r['accion']
 
-    # --- Satélite (Protegido con try/except para no tumbar el reporte principal si falla) ---
+    # --- Satélite (Híbrido: Reversión a la Media + Breakout de Volumen) ---
     if btc_saludable:
         try:
             tickers = exchange.fetch_tickers()
@@ -230,22 +225,35 @@ def ejecutar_bot_maestro():
                 df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
                 df['RSI'], _, df['BB_Lower'] = calcular_rsi(df['cierre'], 14), None, calcular_bollinger_bands(df['cierre'])[2]
                 df['Vol_Medio'], df['ATR'], df['ADX'], df['EMA_TENDENCIA'] = df['volumen'].rolling(20).mean(), calcular_atr(df, 14), calcular_adx(df, 14), df['cierre'].ewm(span=200, adjust=False).mean()
+                df['Max_20'] = df['cierre'].shift(1).rolling(20).max() # Máximo de los últimos 20 periodos para Breakout
                 df = df.dropna().reset_index(drop=True)
                 ultima = df.iloc[-1]
                 
                 patron_smc, hist_alc, hist_baj = detectar_patrones_smc_hist(df)
+                
+                # Estrategia 1: Reversión a la Media (Mean Reversion / Sobreventa)
                 cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['volumen'] >= ultima['Vol_Medio'] * 0.7 and ultima['ADX'] < SATELITE_ADX_MAX and ultima['cierre'] > ultima['EMA_TENDENCIA'])
 
-                # Prioridad 1: Cuantitativo (Más validado y seguro)
+                # Estrategia 2: Ruptura de Rango con Volumen (Breakout / Momentum - Infografía)
+                breakout_ok = (ultima['cierre > Max_20'] if 'cierre > Max_20' in df.columns else ultima['cierre'] > ultima['Max_20']) and (ultima['volumen'] >= ultima['Vol_Medio'] * 1.5) and (ultima['ADX'] > 25)
+
                 if cuantitativo_ok:
                     sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
                     val = validar_senal_historica(df, (df['RSI'] <= SATELITE_RSI_ENTRADA) & (df['cierre'] <= df['BB_Lower'] * 1.01))
                     denominador_riesgo = max(abs(ultima['cierre'] - sl), 0.0001)
                     sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / denominador_riesgo
                     
-                    alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'rsi': ultima['RSI'], 'tipo_alerta': 'CUANTITATIVO_ALCISTA', 'tp': tp, 'sl': sl, 'sugerencia_tamano': sugerencia_tamano, 'validacion': val})
-                    estado_nuevo[s] = 'CUANTITATIVO_ALCISTA'
-                # Prioridad 2: SMC 
+                    alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'rsi': ultima['RSI'], 'tipo_alerta': 'CUANTITATIVO_REVERSION', 'tp': tp, 'sl': sl, 'sugerencia_tamano': sugerencia_tamano, 'validacion': val})
+                    estado_nuevo[s] = 'CUANTITATIVO_REVERSION'
+                elif breakout_ok:
+                    sl = ultima['cierre'] - (1.5 * ultima['ATR'])
+                    tp = ultima['cierre'] + (3.0 * ultima['ATR'])
+                    val = validar_senal_historica(df, (df['cierre'] > df['cierre'].shift(1).rolling(20).max()) & (df['volumen'] >= df['Vol_Medio'] * 1.5))
+                    denominador_riesgo = max(abs(ultima['cierre'] - sl), 0.0001)
+                    sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / denominador_riesgo
+
+                    alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'rsi': ultima['RSI'], 'tipo_alerta': 'BREAKOUT_MOMENTUM', 'tp': tp, 'sl': sl, 'sugerencia_tamano': sugerencia_tamano, 'validacion': val})
+                    estado_nuevo[s] = 'BREAKOUT_MOMENTUM'
                 elif patron_smc:
                     val_smc = validar_senal_historica(df, hist_alc if patron_smc['tipo'] == "SMC_ALCISTA" else hist_baj)
                     denominador_riesgo = max(abs(ultima['cierre'] - patron_smc['sl']), 0.0001)
@@ -262,7 +270,7 @@ def ejecutar_bot_maestro():
     n_env, c_env, s_env = filtrar(alertas_nucleo, None), filtrar(alertas_crecimiento, None), [a for a in alertas_satelite if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], a['tipo_alerta'])]
 
     if n_env or c_env or s_env:
-        msj = f"🚨 *REPORTE DE INVERSIÓN (EXCEL & SMC)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+        msj = f"🚨 *REPORTE DE INVERSIÓN (HÍBRIDO)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
         if n_env:
             msj += "🛡️ *NÚCLEO CONSERVADOR*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in n_env]) + "\n"
         if c_env:
@@ -270,7 +278,8 @@ def ejecutar_bot_maestro():
         if s_env:
             msj += f"🎯 *RADAR DE ALTO RIESGO ({TEMPORALIDAD_SATELITE})*\n"
             for o in s_env:
-                msj += f"{'🟢' if 'ALCISTA' in o['tipo_alerta'] else '🔴'} *{o['tipo_alerta'].replace('_', ' ')}* | *{o['simbolo']}*\n  Entrada: `${o['precio']:,.4f}`\n  🎯 TP: `${o['tp']:,.4f}` | 🛑 SL: `${o['sl']:,.4f}`\n  📏 Tamaño sugerido: `{o['sugerencia_tamano']:,.2f}` UND\n"
+                emoji = '🟢' if 'ALCISTA' in o['tipo_alerta'] or 'REVERSION' in o['tipo_alerta'] or 'BREAKOUT' in o['tipo_alerta'] else '🔴'
+                msj += f"{emoji} *{o['tipo_alerta'].replace('_', ' ')}* | *{o['simbolo']}*\n  Entrada: `${o['precio']:,.4f}`\n  🎯 TP: `${o['tp']:,.4f}` | 🛑 SL: `${o['sl']:,.4f}`\n  📏 Tamaño sugerido: `{o['sugerencia_tamano']:,.2f}` UND\n"
                 if o['validacion'] and o['validacion']['suficiente']:
                     msj += f"  📊 Validado ({o['validacion']['n_casos']} casos): Win Rate {o['validacion']['win_rate']:.0f}%, Promedio {o['validacion']['retorno_promedio']:+.1f}%\n"
                 msj += "\n"
