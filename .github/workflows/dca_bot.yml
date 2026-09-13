@@ -2,8 +2,8 @@ name: Super Bot Cripto 24/7 (Core-Satellite)
 
 on:
   schedule:
-    - cron: '5 3,7,11,15,19,23 * * *'
-  workflow_dispatch:
+    - cron: '5 3,7,11,15,19,23 * * *' # Ejecuta 5 minutos después del cierre oficial de las velas de 4h
+  workflow_dispatch: # Permite ejecutarlo manualmente desde la web cuando quieras
 
 permissions:
   contents: write
