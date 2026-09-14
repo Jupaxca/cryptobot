@@ -10,5 +10,7 @@
   "POL/USD": "NEUTRO",
   "SUI/USD": "COMPRAR",
   "PUMP/USD": "COMPRAR",
-  "ZEC/USD": "ESPERAR"
+  "UNI/USD": "ESPERAR",
+  "ZEC/USD": "ESPERAR",
+  "BNB/USD": "NEUTRO"
 }
