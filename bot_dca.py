@@ -12,19 +12,15 @@ from xgboost import XGBClassifier
 # ==========================================================================
 # 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO
 # ==========================================================================
-# --- Núcleo Conservador: Base del portafolio (Baja volatilidad relativa) ---
 NUCLEO_CONSERVADOR = ['BTC/USD', 'ETH/USD']
 TEMPORALIDAD_NUCLEO = '1d'
 
-# --- Nivel Crecimiento y Alto Potencial: Proyectos principales ---
 NIVEL_CRECIMIENTO = ['SOL/USD', 'LINK/USD', 'AVAX/USD']
 TEMPORALIDAD_CRECIMIENTO = '1d'
 
-# --- Seguimiento Estratégico: XRP, NEAR, ADA, POL y SUI ---
-SEGUIMIENTO_ESTRATEGICO = ['XRP/USD', 'NEAR/USD', 'ADA/USD', 'POL/USD', 'SUI/USD' ,'PUMP/USD','PRAI/USD', 'ZEC/USD']
+SEGUIMIENTO_ESTRATEGICO = ['XRP/USD', 'NEAR/USD', 'ADA/USD', 'POL/USD', 'SUI/USD', 'PUMP/USD', 'UNI/USD', 'ZEC/USD', 'BNB/USD']
 TEMPORALIDAD_SEGUIMIENTO = '1d'
 
-# --- Satélite de Alto Riesgo (5%): Swing trading dinámico en 4h ---
 TEMPORALIDAD_SATELITE = '4h'
 SATELITE_RSI_ENTRADA = 25
 SATELITE_ADX_MAX = 20
@@ -41,8 +37,8 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 ESTADO_PATH = 'bot_estado.json'
 SOLO_ALERTAR_CAMBIOS = True
 
-CAPITAL_REFERENCIA_USD = 90  # Equivale a 370.000 COP en USD para los pares
-RIESGO_POR_TRADE = 0.01      # 1% de riesgo por trade
+CAPITAL_REFERENCIA_USD = 90  
+RIESGO_POR_TRADE = 0.01      
 HORIZONTE_VALIDACION = 14
 
 # ==========================================================================
@@ -149,7 +145,6 @@ def es_mercado_spot_valido(exchange, simbolo):
 # 3. MÓDULOS DE MACHINE LEARNING (IA AVANZADA)
 # ==========================================================================
 def detectar_regimen_kmeans(df_btc):
-    """ Clustering no supervisado para definir el entorno del mercado macro """
     if len(df_btc) < 50: return "DESCONOCIDO"
     try:
         data = pd.DataFrame(index=df_btc.index)
@@ -173,7 +168,6 @@ def detectar_regimen_kmeans(df_btc):
         return "LATERAL"
 
 def inferir_probabilidad_xgboost(df):
-    """ XGBoost calibrado institucionalmente para predecir éxito de señales """
     try:
         df_ml = df.copy()
         df_ml['retorno_futuro'] = df_ml['cierre'].shift(-HORIZONTE_VALIDACION) / df_ml['cierre'] - 1
@@ -265,7 +259,6 @@ def ejecutar_bot_maestro():
     estado_anterior, estado_nuevo = cargar_estado(), {}
     alertas_nucleo, alertas_crecimiento, alertas_seguimiento, alertas_satelite = [], [], [], []
 
-    # Detección de Régimen con ML
     velas_btc = descargar_velas_cerradas(exchange, 'BTC/USD', TEMPORALIDAD_ESCUDO, VELAS_ESCUDO_BTC)
     regimen_macro = "DESCONOCIDO"
     if velas_btc:
@@ -290,56 +283,59 @@ def ejecutar_bot_maestro():
             alertas_seguimiento.append(r)
             estado_nuevo[s] = r['accion']
 
-    # --- Satélite (Híbrido + IA XGBoost) ---
-    if regimen_macro in ["ALCISTA", "LATERAL"]:
-        try:
-            tickers = exchange.fetch_tickers()
-            excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_CRECIMIENTO) | set(SEGUIMIENTO_ESTRATEGICO)
-            candidatas = sorted([s for s, t in tickers.items() if '/USD' in s and s not in excluidos and 'USDT' not in s and es_mercado_spot_valido(exchange, s) and t.get('quoteVolume', 0) > 1000000], key=lambda s: tickers[s].get('quoteVolume', 0), reverse=True)[:10]
+    # --- Satélite (Híbrido + IA XGBoost - Corrección para evaluar siempre) ---
+    try:
+        tickers = exchange.fetch_tickers()
+        excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_CRECIMIENTO) | set(SEGUIMIENTO_ESTRATEGICO)
+        candidatas = sorted([s for s, t in tickers.items() if '/USD' in s and s not in excluidos and 'USDT' not in s and es_mercado_spot_valido(exchange, s) and t.get('quoteVolume', 0) > 1000000], key=lambda s: tickers[s].get('quoteVolume', 0), reverse=True)[:10]
 
-            for s in candidatas:
-                velas = descargar_velas_cerradas(exchange, s, TEMPORALIDAD_SATELITE, VELAS_ANALISIS)
-                if not velas or len(velas) < 60: continue
-                
-                df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
-                df['RSI'], _, df['BB_Lower'] = calcular_rsi(df['cierre'], 14), None, calcular_bollinger_bands(df['cierre'])[2]
-                df['Vol_Medio'], df['ATR'], df['ADX'], df['EMA_TENDENCIA'] = df['volumen'].rolling(20).mean(), calcular_atr(df, 14), calcular_adx(df, 14), df['cierre'].ewm(span=200, adjust=False).mean()
-                df['Max_20'] = df['cierre'].shift(1).rolling(20).max()
-                df = df.dropna().reset_index(drop=True)
-                ultima = df.iloc[-1]
-                
-                patron_smc, hist_alc, hist_baj = detectar_patrones_smc_hist(df)
-                
-                # Reglas adaptativas basadas en el Régimen
-                if regimen_macro == "LATERAL":
-                    cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['volumen'] >= ultima['Vol_Medio'] * 0.7)
-                    breakout_ok = False # En lateral se apagan las rupturas
-                else: # ALCISTA
-                    cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['ADX'] < SATELITE_ADX_MAX)
-                    breakout_ok = (ultima['cierre'] > ultima['Max_20']) and (ultima['volumen'] >= ultima['Vol_Medio'] * 1.5) and (ultima['ADX'] > 25)
+        for s in candidatas:
+            velas = descargar_velas_cerradas(exchange, s, TEMPORALIDAD_SATELITE, VELAS_ANALISIS)
+            if not velas or len(velas) < 60: continue
+            
+            df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+            df['RSI'], _, df['BB_Lower'] = calcular_rsi(df['cierre'], 14), None, calcular_bollinger_bands(df['cierre'])[2]
+            df['Vol_Medio'], df['ATR'], df['ADX'], df['EMA_TENDENCIA'] = df['volumen'].rolling(20).mean(), calcular_atr(df, 14), calcular_adx(df, 14), df['cierre'].ewm(span=200, adjust=False).mean()
+            df['Max_20'] = df['cierre'].shift(1).rolling(20).max()
+            df = df.dropna().reset_index(drop=True)
+            ultima = df.iloc[-1]
+            
+            patron_smc, hist_alc, hist_baj = detectar_patrones_smc_hist(df)
+            
+            # Reglas adaptativas según régimen, pero sin apagar el satélite por completo
+            if regimen_macro == "BAJISTA":
+                # En mercado bajista solo permitimos SMC altamente selectivo
+                cuantitativo_ok = False
+                breakout_ok = False
+            elif regimen_macro == "LATERAL":
+                cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['volumen'] >= ultima['Vol_Medio'] * 0.7)
+                breakout_ok = False 
+            else: # ALCISTA
+                cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['ADX'] < SATELITE_ADX_MAX)
+                breakout_ok = (ultima['cierre'] > ultima['Max_20']) and (ultima['volumen'] >= ultima['Vol_Medio'] * 1.5) and (ultima['ADX'] > 25)
 
-                if cuantitativo_ok:
-                    sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
-                    val = validar_senal_historica(df, (df['RSI'] <= SATELITE_RSI_ENTRADA) & (df['cierre'] <= df['BB_Lower'] * 1.01))
-                    prob_ml = inferir_probabilidad_xgboost(df)
-                    
-                    alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'CUANTITATIVO_REVERSION', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_ml': prob_ml})
-                    estado_nuevo[s] = 'CUANTITATIVO_REVERSION'
-                elif breakout_ok:
-                    sl, tp = ultima['cierre'] - (1.5 * ultima['ATR']), ultima['cierre'] + (3.0 * ultima['ATR'])
-                    val = validar_senal_historica(df, (df['cierre'] > df['cierre'].shift(1).rolling(20).max()) & (df['volumen'] >= df['Vol_Medio'] * 1.5))
-                    prob_ml = inferir_probabilidad_xgboost(df)
+            if cuantitativo_ok:
+                sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
+                val = validar_senal_historica(df, (df['RSI'] <= SATELITE_RSI_ENTRADA) & (df['cierre'] <= df['BB_Lower'] * 1.01))
+                prob_ml = inferir_probabilidad_xgboost(df)
+                
+                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'CUANTITATIVO_REVERSION', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_ml': prob_ml})
+                estado_nuevo[s] = 'CUANTITATIVO_REVERSION'
+            elif breakout_ok:
+                sl, tp = ultima['cierre'] - (1.5 * ultima['ATR']), ultima['cierre'] + (3.0 * ultima['ATR'])
+                val = validar_senal_historica(df, (df['cierre'] > df['cierre'].shift(1).rolling(20).max()) & (df['volumen'] >= ultima['Vol_Medio'] * 1.5))
+                prob_ml = inferir_probabilidad_xgboost(df)
 
-                    alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'BREAKOUT_MOMENTUM', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_ml': prob_ml})
-                    estado_nuevo[s] = 'BREAKOUT_MOMENTUM'
-                elif patron_smc:
-                    val_smc = validar_senal_historica(df, hist_alc if patron_smc['tipo'] == "SMC_ALCISTA" else hist_baj)
-                    prob_ml = inferir_probabilidad_xgboost(df)
-                    
-                    alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': patron_smc['tipo'], 'tp': patron_smc['tp'], 'sl': patron_smc['sl'], 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - patron_smc['sl']), 0.0001), 'validacion': val_smc, 'prob_ml': prob_ml})
-                    estado_nuevo[s] = patron_smc['tipo']
-        except Exception as e:
-            print(f"⚠️ Error procesando el bloque satélite: {e}")
+                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'BREAKOUT_MOMENTUM', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_ml': prob_ml})
+                estado_nuevo[s] = 'BREAKOUT_MOMENTUM'
+            elif patron_smc:
+                val_smc = validar_senal_historica(df, hist_alc if patron_smc['tipo'] == "SMC_ALCISTA" else hist_baj)
+                prob_ml = inferir_probabilidad_xgboost(df)
+                
+                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': patron_smc['tipo'], 'tp': patron_smc['tp'], 'sl': patron_smc['sl'], 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - patron_smc['sl']), 0.0001), 'validacion': val_smc, 'prob_ml': prob_ml})
+                estado_nuevo[s] = patron_smc['tipo']
+    except Exception as e:
+        print(f"⚠️ Error procesando el bloque satélite: {e}")
 
     hubo_cambio = lambda s, a: estado_anterior.get(s) != a
     filtrar = lambda l, c: [a for a in l if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], a.get('accion', c))]
