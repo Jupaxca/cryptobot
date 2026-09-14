@@ -36,6 +36,7 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add bot_estado.json memoria_predicciones.csv
+          git add bot_estado.json || echo "bot_estado.json no encontrado"
+          git add memoria_predicciones.csv || echo "memoria_predicciones.csv no creado aún"
           git commit -m "update: persistencia automatica del estado y memoria IA del bot" || echo "Sin cambios de estado"
           git push
