@@ -32,10 +32,10 @@ jobs:
         run: |
           python bot_dca.py
 
-      - name: Persistir estado (Evitar Spam en Telegram)
+      - name: Persistir estado y Memoria IA (Evitar amnesia del modelo)
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add bot_estado.json
-          git commit -m "update: persistencia automatica del estado del bot" || echo "Sin cambios de estado"
+          git add bot_estado.json memoria_predicciones.csv
+          git commit -m "update: persistencia automatica del estado y memoria IA del bot" || echo "Sin cambios de estado"
           git push
