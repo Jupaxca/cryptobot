@@ -21,7 +21,7 @@ NIVEL_CRECIMIENTO = ['SOL/USD', 'LINK/USD', 'AVAX/USD']
 TEMPORALIDAD_CRECIMIENTO = '1d'
 
 # --- Seguimiento Estratégico: XRP, NEAR, ADA, POL y SUI ---
-SEGUIMIENTO_ESTRATEGICO = ['XRP/USD', 'NEAR/USD', 'ADA/USD', 'POL/USD', 'SUI/USD']
+SEGUIMIENTO_ESTRATEGICO = ['XRP/USD', 'NEAR/USD', 'ADA/USD', 'POL/USD', 'SUI/USD' ,'PUMP/USD', 'ZEC/USD']
 TEMPORALIDAD_SEGUIMIENTO = '1d'
 
 # --- Satélite de Alto Riesgo (5%): Swing trading dinámico en 4h ---
