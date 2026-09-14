@@ -12,13 +12,13 @@ from xgboost import XGBClassifier
 # ==========================================================================
 # 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO
 # ==========================================================================
-NUCLEO_CONSERVADOR = ['BTC/USD', 'ETH/USD']
+NUCLEO_CONSERVADOR = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'LINK/USD', 'BNB/USD']
 TEMPORALIDAD_NUCLEO = '1d'
 
-NIVEL_CRECIMIENTO = ['SOL/USD', 'LINK/USD', 'AVAX/USD']
+NIVEL_CRECIMIENTO = ['NEAR/USD', 'ONDO/USD', 'TAO/USD', 'AVAX/USD']
 TEMPORALIDAD_CRECIMIENTO = '1d'
 
-SEGUIMIENTO_ESTRATEGICO = ['XRP/USD', 'NEAR/USD', 'ADA/USD', 'POL/USD', 'SUI/USD', 'PUMP/USD', 'UNI/USD', 'ZEC/USD', 'BNB/USD']
+SEGUIMIENTO_ESTRATEGICO = ['XRP/USD', 'HYPE/USD', 'ADA/USD', 'POL/USD', 'SUI/USD', 'PUMP/USD', 'UNI/USD', 'ZEC/USD']
 TEMPORALIDAD_SEGUIMIENTO = '1d'
 
 TEMPORALIDAD_SATELITE = '4h'
@@ -35,6 +35,7 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 ESTADO_PATH = 'bot_estado.json'
+ARCHIVO_MEMORIA = 'memoria_predicciones.csv' # NUEVO: Archivo de memoria IA
 SOLO_ALERTAR_CAMBIOS = False
 
 CAPITAL_REFERENCIA_USD = 90  
@@ -129,12 +130,23 @@ def detectar_patrones_smc_hist(df):
 def validar_senal_historica(df, condicion_activa, horizonte=HORIZONTE_VALIDACION):
     disparos = np.where(condicion_activa)[0]
     disparos = disparos[disparos < len(df) - horizonte]
+    
     if len(disparos) < 5:
-        return {'n_casos': len(disparos), 'win_rate': None, 'retorno_promedio': None, 'suficiente': False}
+        return {'n_casos': len(disparos), 'win_rate': None, 'retorno_promedio': None, 'suficiente': False, 'mc_confianza': None}
+        
     retornos = np.array([(df.iloc[i + horizonte]['cierre'] / df.iloc[i]['cierre'] - 1) * 100 for i in disparos])
+    
+    # NUEVO: Simulación de Monte Carlo (1000 iteraciones)
+    np.random.seed(42)
+    simulaciones_mc = [np.random.choice(retornos, size=len(retornos), replace=True).sum() for _ in range(1000)]
+    prob_positiva_mc = (np.array(simulaciones_mc) > 0).mean() * 100
+    
     return {
-        'n_casos': len(disparos), 'win_rate': (retornos > 0).mean() * 100,
-        'retorno_promedio': retornos.mean(), 'suficiente': len(disparos) >= 15
+        'n_casos': len(disparos), 
+        'win_rate': (retornos > 0).mean() * 100,
+        'retorno_promedio': retornos.mean(), 
+        'suficiente': len(disparos) >= 15,
+        'mc_confianza': prob_positiva_mc
     }
 
 def es_mercado_spot_valido(exchange, simbolo):
@@ -142,8 +154,68 @@ def es_mercado_spot_valido(exchange, simbolo):
     return mercado and mercado.get('spot', False) is True and mercado.get('type', 'spot') == 'spot'
 
 # ==========================================================================
-# 3. MÓDULOS DE MACHINE LEARNING (IA AVANZADA)
+# 3. MÓDULOS DE MEMORIA E IA AVANZADA
 # ==========================================================================
+
+# --- NUEVO: SISTEMA DE MEMORIA (FEEDBACK LOOP) ---
+def registrar_prediccion(simbolo, precio_entrada, rsi, atr, adx, volumen, prob_subida):
+    nueva_fila = pd.DataFrame([{
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'simbolo': simbolo,
+        'precio_entrada': precio_entrada,
+        'RSI': rsi, 'ATR': atr, 'ADX': adx, 'volumen': volumen,
+        'prob_subida_predicha': prob_subida,
+        'precio_futuro': np.nan,  
+        'exito_real': np.nan      
+    }])
+    if not os.path.exists(ARCHIVO_MEMORIA):
+        nueva_fila.to_csv(ARCHIVO_MEMORIA, index=False)
+    else:
+        nueva_fila.to_csv(ARCHIVO_MEMORIA, mode='a', header=False, index=False)
+
+def auditar_memoria(exchange, horizonte_dias=HORIZONTE_VALIDACION):
+    if not os.path.exists(ARCHIVO_MEMORIA): return
+    df_memoria = pd.read_csv(ARCHIVO_MEMORIA)
+    df_memoria['timestamp'] = pd.to_datetime(df_memoria['timestamp'])
+    ahora = datetime.now(timezone.utc)
+    pendientes = df_memoria[df_memoria['exito_real'].isna()]
+    cambios = False
+    
+    for idx, fila in pendientes.iterrows():
+        if (ahora - fila['timestamp']).days >= horizonte_dias:
+            try:
+                velas = exchange.fetch_ohlcv(fila['simbolo'], timeframe='1d', limit=2)
+                if velas:
+                    precio_actual = velas[-1][4]
+                    df_memoria.at[idx, 'precio_futuro'] = precio_actual
+                    df_memoria.at[idx, 'exito_real'] = 1 if precio_actual > fila['precio_entrada'] else 0
+                    cambios = True
+            except Exception as e:
+                print(f"⚠️ Error auditando {fila['simbolo']}: {e}")
+                
+    if cambios:
+        df_memoria.to_csv(ARCHIVO_MEMORIA, index=False)
+        print("🧠 Auditoría completada: El bot ha evaluado sus predicciones pasadas.")
+
+def calcular_riesgo_dinamico(riesgo_base=0.01):
+    if not os.path.exists(ARCHIVO_MEMORIA):
+        return riesgo_base, "SIN DATOS" 
+        
+    df_mem = pd.read_csv(ARCHIVO_MEMORIA)
+    auditadas = df_mem.dropna(subset=['exito_real'])
+    
+    if len(auditadas) < 10:
+        return riesgo_base, "RECOPILANDO" 
+        
+    win_rate_reciente = auditadas.tail(10)['exito_real'].mean() 
+    
+    if win_rate_reciente < 0.40:
+        return riesgo_base * 0.5, f"PERDEDORA ({win_rate_reciente*100:.0f}%)"
+    elif win_rate_reciente > 0.60:
+        return riesgo_base * 1.5, f"GANADORA ({win_rate_reciente*100:.0f}%)"
+        
+    return riesgo_base, f"ESTABLE ({win_rate_reciente*100:.0f}%)"
+
 def detectar_regimen_kmeans(df_btc):
     if len(df_btc) < 50: return "DESCONOCIDO"
     try:
@@ -179,26 +251,31 @@ def inferir_probabilidad_xgboost(df):
         X = df_ml[:-HORIZONTE_VALIDACION][features]
         y = df_ml[:-HORIZONTE_VALIDACION]['exito']
         
-        if len(X) < 50 or y.nunique() < 2: return None
+        # --- NUEVO: Inyectar Memoria ---
+        if os.path.exists(ARCHIVO_MEMORIA):
+            df_mem = pd.read_csv(ARCHIVO_MEMORIA).dropna(subset=['exito_real'])
+            if not df_mem.empty:
+                X_memoria = df_mem[features]
+                y_memoria = df_mem['exito_real']
+                X = pd.concat([X, X_memoria, X_memoria], ignore_index=True)
+                y = pd.concat([y, y_memoria, y_memoria], ignore_index=True)
+        # -------------------------------
+        
+        if len(X) < 50 or y.nunique() < 2: return None, None
         
         xgb_model = XGBClassifier(
-            n_estimators=100,
-            max_depth=3,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=42,
-            eval_metric='logloss',
-            use_label_encoder=False
+            n_estimators=100, max_depth=3, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8, random_state=42,
+            eval_metric='logloss', use_label_encoder=False
         )
         xgb_model.fit(X, y)
         
         X_actual = df_ml.iloc[-1:][features]
-        prob_exito = xgb_model.predict_proba(X_actual)[0][1] * 100
-        return prob_exito
+        probabilidades = xgb_model.predict_proba(X_actual)[0]
+        return probabilidades[1] * 100, probabilidades[0] * 100
     except Exception as e: 
         print(f"⚠️ Error en XGBoost: {e}")
-        return None
+        return None, None
 
 # ==========================================================================
 # 4. TELEGRAM Y ESTADO
@@ -224,7 +301,7 @@ def guardar_estado(estado):
 # ==========================================================================
 # 5. ANÁLISIS DE ACTIVOS
 # ==========================================================================
-def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, rsi_compra, rsi_venta, sobreprecio_pct, es_crecimiento=False):
+def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, rsi_compra, rsi_venta, sobreprecio_pct, riesgo_aplicado, es_crecimiento=False):
     velas = descargar_velas_cerradas(exchange, simbolo, temporalidad, VELAS_ANALISIS)
     if not velas or len(velas) < 60: return None
 
@@ -246,7 +323,7 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
         accion, etiqueta, validacion = "NEUTRO", f"{prefijo}⚪ *ZONA NEUTRA:* Mercado estable.", None
 
     denominador_atr = max(atr * 2.5, 0.0001)
-    sugerencia_tamano = CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / denominador_atr
+    sugerencia_tamano = CAPITAL_REFERENCIA_USD * riesgo_aplicado / denominador_atr
 
     return {'simbolo': simbolo, 'precio': precio, 'rsi': rsi, 'media_30': media_30, 'accion': accion, 'etiqueta': etiqueta, 'validacion': validacion, 'sugerencia_tamano': sugerencia_tamano, 'atr': atr}
 
@@ -256,6 +333,13 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
 def ejecutar_bot_maestro():
     exchange = ccxt.kraken({'enableRateLimit': True, 'timeout': 30000})
     exchange.load_markets()
+    
+    # 1. Auditoría automática al arrancar
+    auditar_memoria(exchange)
+    # 2. Calcular hiperparámetro de riesgo dinámico
+    riesgo_dinamico, estado_racha = calcular_riesgo_dinamico(RIESGO_POR_TRADE)
+    print(f"⚖️ Riesgo dinámico ajustado a: {riesgo_dinamico*100:.2f}% | Racha: {estado_racha}")
+    
     estado_anterior, estado_nuevo = cargar_estado(), {}
     alertas_nucleo, alertas_crecimiento, alertas_seguimiento, alertas_satelite = [], [], [], []
 
@@ -269,21 +353,21 @@ def ejecutar_bot_maestro():
 
     # --- Bloques Base ---
     for s in NUCLEO_CONSERVADOR:
-        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_NUCLEO, 0.04, 40, 75, 0.05, False):
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_NUCLEO, 0.04, 40, 75, 0.05, riesgo_dinamico, False):
             alertas_nucleo.append(r)
             estado_nuevo[s] = r['accion']
 
     for s in NIVEL_CRECIMIENTO:
-        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_CRECIMIENTO, 0.07, 35, 80, 0.08, True):
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_CRECIMIENTO, 0.07, 35, 80, 0.08, riesgo_dinamico, True):
             alertas_crecimiento.append(r)
             estado_nuevo[s] = r['accion']
 
     for s in SEGUIMIENTO_ESTRATEGICO:
-        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_SEGUIMIENTO, 0.06, 35, 78, 0.07, True):
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_SEGUIMIENTO, 0.06, 35, 78, 0.07, riesgo_dinamico, True):
             alertas_seguimiento.append(r)
             estado_nuevo[s] = r['accion']
 
-    # --- Satélite (Híbrido + IA XGBoost - Corrección para evaluar siempre) ---
+    # --- Satélite (Híbrido + IA XGBoost) ---
     try:
         tickers = exchange.fetch_tickers()
         excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_CRECIMIENTO) | set(SEGUIMIENTO_ESTRATEGICO)
@@ -302,9 +386,7 @@ def ejecutar_bot_maestro():
             
             patron_smc, hist_alc, hist_baj = detectar_patrones_smc_hist(df)
             
-            # Reglas adaptativas según régimen, pero sin apagar el satélite por completo
             if regimen_macro == "BAJISTA":
-                # En mercado bajista solo permitimos SMC altamente selectivo
                 cuantitativo_ok = False
                 breakout_ok = False
             elif regimen_macro == "LATERAL":
@@ -317,22 +399,27 @@ def ejecutar_bot_maestro():
             if cuantitativo_ok:
                 sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
                 val = validar_senal_historica(df, (df['RSI'] <= SATELITE_RSI_ENTRADA) & (df['cierre'] <= df['BB_Lower'] * 1.01))
-                prob_ml = inferir_probabilidad_xgboost(df)
+                prob_subida, prob_bajada = inferir_probabilidad_xgboost(df)
                 
-                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'CUANTITATIVO_REVERSION', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_ml': prob_ml})
+                if prob_subida is not None: registrar_prediccion(s, ultima['cierre'], ultima['RSI'], ultima['ATR'], ultima['ADX'], ultima['volumen'], prob_subida)
+                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'CUANTITATIVO_REVERSION', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * riesgo_dinamico / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada})
                 estado_nuevo[s] = 'CUANTITATIVO_REVERSION'
+                
             elif breakout_ok:
                 sl, tp = ultima['cierre'] - (1.5 * ultima['ATR']), ultima['cierre'] + (3.0 * ultima['ATR'])
                 val = validar_senal_historica(df, (df['cierre'] > df['cierre'].shift(1).rolling(20).max()) & (df['volumen'] >= ultima['Vol_Medio'] * 1.5))
-                prob_ml = inferir_probabilidad_xgboost(df)
+                prob_subida, prob_bajada = inferir_probabilidad_xgboost(df)
 
-                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'BREAKOUT_MOMENTUM', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_ml': prob_ml})
+                if prob_subida is not None: registrar_prediccion(s, ultima['cierre'], ultima['RSI'], ultima['ATR'], ultima['ADX'], ultima['volumen'], prob_subida)
+                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'BREAKOUT_MOMENTUM', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * riesgo_dinamico / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada})
                 estado_nuevo[s] = 'BREAKOUT_MOMENTUM'
+                
             elif patron_smc:
                 val_smc = validar_senal_historica(df, hist_alc if patron_smc['tipo'] == "SMC_ALCISTA" else hist_baj)
-                prob_ml = inferir_probabilidad_xgboost(df)
+                prob_subida, prob_bajada = inferir_probabilidad_xgboost(df)
                 
-                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': patron_smc['tipo'], 'tp': patron_smc['tp'], 'sl': patron_smc['sl'], 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * RIESGO_POR_TRADE / max(abs(ultima['cierre'] - patron_smc['sl']), 0.0001), 'validacion': val_smc, 'prob_ml': prob_ml})
+                if prob_subida is not None: registrar_prediccion(s, ultima['cierre'], ultima['RSI'], ultima['ATR'], ultima['ADX'], ultima['volumen'], prob_subida)
+                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': patron_smc['tipo'], 'tp': patron_smc['tp'], 'sl': patron_smc['sl'], 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * riesgo_dinamico / max(abs(ultima['cierre'] - patron_smc['sl']), 0.0001), 'validacion': val_smc, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada})
                 estado_nuevo[s] = patron_smc['tipo']
     except Exception as e:
         print(f"⚠️ Error procesando el bloque satélite: {e}")
@@ -347,7 +434,9 @@ def ejecutar_bot_maestro():
 
     if n_env or c_env or seg_env or s_env:
         msj = f"🚨 *REPORTE IA (MULTI-BLOQUE)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
-        msj += f"🌐 *Régimen Macro:* `{regimen_macro}`\n\n"
+        msj += f"🌐 *Régimen Macro:* `{regimen_macro}`\n"
+        msj += f"🧠 *Racha IA:* `{estado_racha}` | Riesgo actual: `{riesgo_dinamico*100:.2f}%`\n\n"
+        
         if n_env:
             msj += "🛡️ *NÚCLEO CONSERVADOR*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in n_env]) + "\n"
         if c_env:
@@ -360,11 +449,13 @@ def ejecutar_bot_maestro():
                 emoji = '🟢' if 'ALCISTA' in o['tipo_alerta'] or 'REVERSION' in o['tipo_alerta'] or 'BREAKOUT' in o['tipo_alerta'] else '🔴'
                 msj += f"{emoji} *{o['tipo_alerta'].replace('_', ' ')}* | *{o['simbolo']}*\n  Entrada: `${o['precio']:,.4f}`\n  🎯 TP: `${o['tp']:,.4f}` | 🛑 SL: `${o['sl']:,.4f}`\n  📏 Tamaño sugerido: `{o['sugerencia_tamano']:,.2f}` UND\n"
                 
-                if o.get('prob_ml') is not None:
-                    msj += f"  🤖 *Probabilidad IA (XGBoost):* `{o['prob_ml']:.1f}% éxito`\n"
+                if o.get('prob_subida') is not None:
+                    msj += f"  🤖 *Probabilidad IA:* 📈 Alza: `{o['prob_subida']:.1f}%` | 📉 Baja: `{o['prob_bajada']:.1f}%`\n"
                     
                 if o['validacion'] and o['validacion']['suficiente']:
                     msj += f"  📊 Histórico: Win Rate {o['validacion']['win_rate']:.0f}%, Promedio {o['validacion']['retorno_promedio']:+.1f}%\n"
+                    if o['validacion']['mc_confianza'] is not None:
+                        msj += f"  🎲 *Monte Carlo Edge:* `{o['validacion']['mc_confianza']:.1f}%` prob. de ser rentable.\n"
                 msj += "\n"
         msj += "_⚠️ Herramienta de apoyo analítico basada en IA. Verifique siempre antes de operar._"
         enviar_alerta_telegram(msj)
