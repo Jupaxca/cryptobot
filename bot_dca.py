@@ -12,13 +12,13 @@ from xgboost import XGBClassifier
 # ==========================================================================
 # 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO
 # ==========================================================================
-NUCLEO_CONSERVADOR = ['BTC/USD', 'ETH/USD', 'SOL/USD', 'LINK/USD', 'BNB/USD']
+NUCLEO_CONSERVADOR = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'LINK/USDT', 'BNB/USDT']
 TEMPORALIDAD_NUCLEO = '1d'
 
-NIVEL_CRECIMIENTO = ['NEAR/USD', 'ONDO/USD', 'TAO/USD', 'AVAX/USD']
+NIVEL_CRECIMIENTO = ['NEAR/USDT', 'ONDO/USDT', 'TAO/USDT', 'AVAX/USDT']
 TEMPORALIDAD_CRECIMIENTO = '1d'
 
-SEGUIMIENTO_ESTRATEGICO = ['XRP/USD', 'HYPE/USD', 'ADA/USD', 'POL/USD', 'SUI/USD', 'PUMP/USD', 'UNI/USD', 'ZEC/USD']
+SEGUIMIENTO_ESTRATEGICO = ['XRP/USDT', 'HYPE/USDT', 'ADA/USDT', 'POL/USDT', 'SUI/USDT', 'PUMP/USDT', 'UNI/USDT', 'ZEC/USDT']
 TEMPORALIDAD_SEGUIMIENTO = '1d'
 
 TEMPORALIDAD_SATELITE = '4h'
@@ -327,11 +327,11 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
 
     return {'simbolo': simbolo, 'precio': precio, 'rsi': rsi, 'media_30': media_30, 'accion': accion, 'etiqueta': etiqueta, 'validacion': validacion, 'sugerencia_tamano': sugerencia_tamano, 'atr': atr}
 
-# ==========================================================================
+## ==========================================================================
 # 6. BOT MAESTRO
 # ==========================================================================
 def ejecutar_bot_maestro():
-    exchange = ccxt.kraken({'enableRateLimit': True, 'timeout': 30000})
+    exchange = ccxt.kucoin({'enableRateLimit': True, 'timeout': 30000})
     exchange.load_markets()
     
     # 1. Auditoría automática al arrancar
