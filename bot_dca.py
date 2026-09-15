@@ -21,8 +21,8 @@ TEMPORALIDAD_CRECIMIENTO = '1d'
 SEGUIMIENTO_ESTRATEGICO = ['XRP/USDT', 'HYPE/USDT', 'ADA/USDT', 'POL/USDT', 'SUI/USDT', 'PUMP/USDT', 'UNI/USDT', 'ZEC/USDT']
 TEMPORALIDAD_SEGUIMIENTO = '1d'
 
-ALTO_RIESGO= ['THETA/USDT', 'ASTER/USDT']
-TEMPORALIDAD_SEGUIMIENTO = '1d'
+ALTO_RIESGO = ['THETA/USDT', 'ASTER/USDT']
+TEMPORALIDAD_ALTO_RIESGO = '1d'
 
 TEMPORALIDAD_SATELITE = '4h'
 SATELITE_RSI_ENTRADA = 25
@@ -344,9 +344,9 @@ def ejecutar_bot_maestro():
     print(f"⚖️ Riesgo dinámico ajustado a: {riesgo_dinamico*100:.2f}% | Racha: {estado_racha}")
     
     estado_anterior, estado_nuevo = cargar_estado(), {}
-    alertas_nucleo, alertas_crecimiento, alertas_seguimiento, alertas_satelite = [], [], [], []
+    alertas_nucleo, alertas_crecimiento, alertas_seguimiento, alertas_alto_riesgo, alertas_satelite = [], [], [], [], []
 
-    velas_btc = descargar_velas_cerradas(exchange, 'BTC/USD', TEMPORALIDAD_ESCUDO, VELAS_ESCUDO_BTC)
+    velas_btc = descargar_velas_cerradas(exchange, 'BTC/USDT', TEMPORALIDAD_ESCUDO, VELAS_ESCUDO_BTC)
     regimen_macro = "DESCONOCIDO"
     if velas_btc:
         df_btc = pd.DataFrame(velas_btc, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
@@ -370,11 +370,18 @@ def ejecutar_bot_maestro():
             alertas_seguimiento.append(r)
             estado_nuevo[s] = r['accion']
 
+    # --- NUEVO: Bloque Alto Riesgo ---
+    for s in ALTO_RIESGO:
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_ALTO_RIESGO, 0.08, 30, 80, 0.10, riesgo_dinamico, True):
+            alertas_alto_riesgo.append(r)
+            estado_nuevo[s] = r['accion']
+
     # --- Satélite (Híbrido + IA XGBoost) ---
     try:
         tickers = exchange.fetch_tickers()
-        excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_CRECIMIENTO) | set(SEGUIMIENTO_ESTRATEGICO)
-        candidatas = sorted([s for s, t in tickers.items() if '/USD' in s and s not in excluidos and 'USDT' not in s and es_mercado_spot_valido(exchange, s) and t.get('quoteVolume', 0) > 1000000], key=lambda s: tickers[s].get('quoteVolume', 0), reverse=True)[:10]
+        # Se agregan las monedas de ALTO_RIESGO a los excluidos para que no se analicen doble
+        excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_CRECIMIENTO) | set(SEGUIMIENTO_ESTRATEGICO) | set(ALTO_RIESGO)
+        candidatas = sorted([s for s, t in tickers.items() if '/USDT' in s and s not in excluidos and es_mercado_spot_valido(exchange, s) and t.get('quoteVolume', 0) > 1000000], key=lambda s: tickers[s].get('quoteVolume', 0), reverse=True)[:10]
 
         for s in candidatas:
             velas = descargar_velas_cerradas(exchange, s, TEMPORALIDAD_SATELITE, VELAS_ANALISIS)
@@ -433,19 +440,22 @@ def ejecutar_bot_maestro():
     n_env = filtrar(alertas_nucleo, None)
     c_env = filtrar(alertas_crecimiento, None)
     seg_env = filtrar(alertas_seguimiento, None)
+    ar_env = filtrar(alertas_alto_riesgo, None)
     s_env = [a for a in alertas_satelite if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], a['tipo_alerta'])]
 
-    if n_env or c_env or seg_env or s_env:
+    if n_env or c_env or seg_env or ar_env or s_env:
         msj = f"🚨 *REPORTE IA (MULTI-BLOQUE)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
         msj += f"🌐 *Régimen Macro:* `{regimen_macro}`\n"
         msj += f"🧠 *Racha IA:* `{estado_racha}` | Riesgo actual: `{riesgo_dinamico*100:.2f}%`\n\n"
         
         if n_env:
-            msj += "🛡️ *NÚCLEO CONSERVADOR*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in n_env]) + "\n"
+            msj += "🛡️ *NÚCLEO CONSERVADOR*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.4f}`\n  {o['etiqueta']}\n" for o in n_env]) + "\n"
         if c_env:
-            msj += "🚀 *CRECIMIENTO PRINCIPAL*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.2f}`\n  {o['etiqueta']}\n" for o in c_env]) + "\n"
+            msj += "🚀 *CRECIMIENTO PRINCIPAL*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.4f}`\n  {o['etiqueta']}\n" for o in c_env]) + "\n"
         if seg_env:
             msj += "📊 *SEGUIMIENTO ESTRATÉGICO*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.4f}`\n  {o['etiqueta']}\n" for o in seg_env]) + "\n"
+        if ar_env:
+            msj += "🔥 *APUESTAS DE ALTO RIESGO*\n" + "".join([f"• *{o['simbolo']}* | `${o['precio']:,.4f}`\n  {o['etiqueta']}\n" for o in ar_env]) + "\n"
         if s_env:
             msj += f"🎯 *RADAR DE ALTO RIESGO ({TEMPORALIDAD_SATELITE})*\n"
             for o in s_env:
