@@ -54,12 +54,9 @@ HORIZONTE_VALIDACION = 14
 # ==========================================================================
 def descargar_velas_cerradas(exchange, simbolo, temporalidad, limit):
     try:
-        tf_ms = exchange.parse_timeframe(temporalidad) * 1000
-        velas = exchange.fetch_ohlcv(simbolo, timeframe=temporalidad, limit=limit + 1)
-        if not velas: return velas
-        if velas[-1][0] + tf_ms > exchange.milliseconds():
-            velas = velas[:-1]
-        return velas[-limit:] if len(velas) > limit else velas
+        # ACTUALIZADO: Ahora descarga el precio en vivo sin recortar la vela actual
+        velas = exchange.fetch_ohlcv(simbolo, timeframe=temporalidad, limit=limit)
+        return velas
     except Exception: return None
 
 def calcular_rsi(series, period=14):
@@ -185,7 +182,6 @@ def es_mercado_spot_valido(exchange, simbolo):
 # ==========================================================================
 # 3. MÓDULOS DE MEMORIA E IA AVANZADA
 # ==========================================================================
-# SE AÑADIERON LOS NUEVOS PARÁMETROS A LA MEMORIA
 def registrar_prediccion(simbolo, precio, rsi, atr, adx, vol, hurst, slope, r2, crt, prob_subida):
     nueva_fila = pd.DataFrame([{
         'timestamp': datetime.now(timezone.utc).isoformat(), 'simbolo': simbolo, 'precio_entrada': precio,
@@ -257,7 +253,6 @@ def inferir_probabilidad_xgboost(df):
         df_ml['retorno_futuro'] = df_ml['cierre'].shift(-HORIZONTE_VALIDACION) / df_ml['cierre'] - 1
         df_ml['exito'] = (df_ml['retorno_futuro'] > 0).astype(int)
         
-        # EL CEREBRO DE LA IA AHORA USA TODA LA FÍSICA DEL MERCADO
         features = ['RSI', 'ATR', 'ADX', 'volumen', 'Hurst', 'Pendiente_Reg', 'R2_Tendencia', 'CRT_Valida']
         df_ml = df_ml.dropna(subset=features)
         
@@ -391,15 +386,13 @@ def ejecutar_bot_maestro():
             df['Vol_Medio'], df['ATR'], df['ADX'] = df['volumen'].rolling(20).mean(), calcular_atr(df, 14), calcular_adx(df, 14)
             df['Max_20'] = df['cierre'].shift(1).rolling(20).max()
             
-            # CALCULO DE LAS NUEVAS MATEMÁTICAS INSTITUCIONALES (Hurst y Regresión)
             df['Hurst'] = df['cierre'].rolling(window=30).apply(calcular_hurst, raw=False)
             df['Pendiente_Reg'] = df['cierre'].rolling(window=20).apply(lambda s: calcular_regresion_lineal(s)[0], raw=False)
             df['R2_Tendencia'] = df['cierre'].rolling(window=20).apply(lambda s: calcular_regresion_lineal(s)[1], raw=False)
             
-            # CÁLCULO DE LA TEORÍA CRT (Cuerpo vs Rango Total)
             rango_velas = df['maximo'] - df['minimo']
             df['CRT'] = np.where(rango_velas == 0, 0, (df['cierre'] - df['apertura']).abs() / rango_velas)
-            df['CRT_Valida'] = (df['CRT'] >= 0.70).astype(int) # 1 si el cuerpo es más del 70%, 0 si no
+            df['CRT_Valida'] = (df['CRT'] >= 0.70).astype(int) 
             
             df = df.dropna().reset_index(drop=True)
             if len(df) == 0: continue
@@ -415,7 +408,6 @@ def ejecutar_bot_maestro():
                 breakout_ok = False 
             else: # ALCISTA
                 cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['ADX'] < SATELITE_ADX_MAX)
-                # El breakout ahora exige que la vela rompedora sea de convicción institucional (CRT)
                 breakout_ok = (ultima['cierre'] > ultima['Max_20']) and (ultima['volumen'] >= ultima['Vol_Medio'] * 1.5) and (ultima['ADX'] > 25) and ultima['CRT_Valida'] == 1
 
             if cuantitativo_ok:
