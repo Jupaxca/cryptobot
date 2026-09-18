@@ -1,5 +1,5 @@
 {
-  "BTC/USDT": "COMPRAR",
+  "BTC/USDT": "NEUTRO",
   "ETH/USDT": "NEUTRO",
   "SOL/USDT": "NEUTRO",
   "LINK/USDT": "NEUTRO",
@@ -9,7 +9,7 @@
   "TAO/USDT": "NEUTRO",
   "AVAX/USDT": "NEUTRO",
   "XRP/USDT": "NEUTRO",
-  "HYPE/USDT": "NEUTRO",
+  "HYPE/USDT": "ESPERAR",
   "ADA/USDT": "NEUTRO",
   "POL/USDT": "NEUTRO",
   "SUI/USDT": "NEUTRO",
