@@ -328,25 +328,28 @@ def inferir_probabilidad_xgboost(df, simbolo_actual):
 
 
 # ==========================================================================
-# 4. TELEGRAM Y ESTADO (CON DIAGNÓSTICO DE CONEXIÓN)
+# 4. TELEGRAM CON DIVISIÓN AUTOMÁTICA DE MENSAJES LARGOS (>4000 CARACTERES)
 # ==========================================================================
 def enviar_alerta_telegram(mensaje):
-    print(f"🔍 Intentando enviar alerta a Telegram para Chat ID: {TELEGRAM_CHAT_ID}...")
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("❌ ERROR: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID no están definidos en el entorno.")
         return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
-        response = requests.post(url, json=payload, timeout=15)
-        
-        print(f"📡 Código de respuesta de Telegram: {response.status_code}")
-        print(f"📦 Respuesta de Telegram: {response.text}")
-        
-        if response.status_code != 200:
-            print("❌ Telegram rechazó el mensaje. Revisa el token o el chat ID.")
-    except Exception as e:
-        print(f"❌ EXCEPCIÓN al conectar con Telegram: {e}")
+    
+    max_length = 4000
+    mensajes = [mensaje[i:i+max_length] for i in range(0, len(mensaje), max_length)]
+    
+    for idx, msg_chunk in enumerate(mensajes):
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg_chunk, "parse_mode": "Markdown"}
+            response = requests.post(url, json=payload, timeout=15)
+            
+            print(f"📡 Código de respuesta de Telegram (Parte {idx+1}): {response.status_code}")
+            if response.status_code != 200:
+                print(f"📦 Error de Telegram: {response.text}")
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"❌ EXCEPCIÓN al conectar con Telegram (Parte {idx+1}): {e}")
 
 
 def cargar_estado():
@@ -554,7 +557,7 @@ def ejecutar_bot_maestro():
 
                 if cuantitativo_ok:
                     tipo_al = 'CUANTITATIVO_REVERSION'
-                    sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
+                    sl, tp = ultima['cierre'] - (SATELENT_ATR_SL_MULT * ultima['ATR']) if 'SATELENT_ATR_SL_MULT' in globals() else ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
                     val = validar_senal_historica(df, (df['RSI'] <= SATELITE_RSI_ENTRADA) & (df['cierre'] <= df['BB_Lower'] * 1.01))
                 elif breakout_ok:
                     tipo_al = 'BREAKOUT_MOMENTUM_CRT'
@@ -577,7 +580,7 @@ def ejecutar_bot_maestro():
         print(f"⚠️ Error procesando el bloque satélite: {e}")
 
     # ==========================================================================
-    # ENVÍO INCONDICIONAL A TELEGRAM (REPORTE CADA 4H)
+    # ENVÍO INCONDICIONAL A TELEGRAM (CON FRAGMENTACIÓN DE MENSAJES)
     # ==========================================================================
     todas_las_alertas_largo_plazo = alertas_nucleo + alertas_crecimiento + alertas_seguimiento + alertas_alto_riesgo
 
