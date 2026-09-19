@@ -10,22 +10,22 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
-# Ignorar advertencias de matemáticas (divisiones por cero en arrays)
+# Ignorar advertencias de matemáticas
 warnings.filterwarnings('ignore')
 
 # ==========================================================================
-# 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO
+# 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO (ACTUALIZADO 2026)
 # ==========================================================================
-NUCLEO_CONSERVADOR = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'LINK/USDT', 'BNB/USDT']
+NUCLEO_CONSERVADOR = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'LINK/USDT']
 TEMPORALIDAD_NUCLEO = '1d'
 
-NIVEL_CRECIMIENTO = ['NEAR/USDT', 'ONDO/USDT', 'TAO/USDT', 'AVAX/USDT']
+NIVEL_CRECIMIENTO = ['NEAR/USDT', 'TAO/USDT', 'AVAX/USDT', 'RENDER/USDT', 'FET/USDT']
 TEMPORALIDAD_CRECIMIENTO = '1d'
 
-SEGUIMIENTO_ESTRATEGICO = ['XRP/USDT', 'HYPE/USDT', 'ADA/USDT', 'POL/USDT', 'SUI/USDT', 'PUMP/USDT', 'UNI/USDT', 'ZEC/USDT']
+SEGUIMIENTO_ESTRATEGICO = ['XRP/USDT', 'SUI/USDT', 'APT/USDT', 'SEI/USDT', 'ADA/USDT', 'PENDLE/USDT']
 TEMPORALIDAD_SEGUIMIENTO = '1d'
 
-ALTO_RIESGO = ['THETA/USDT', 'ASTER/USDT', 'COTI/USDT']
+ALTO_RIESGO = ['THETA/USDT', 'ASTR/USDT', 'COTI/USDT', 'PEPE/USDT', 'WIF/USDT', 'KAS/USDT']
 TEMPORALIDAD_ALTO_RIESGO = '1d'
 
 TEMPORALIDAD_SATELITE = '4h'
@@ -64,6 +64,10 @@ def calcular_rsi(series, period=14):
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     rs = gain / loss
     return (100 - (100 / (1 + rs))).replace([np.inf, -np.inf], 100)
+
+def calcular_vwma(df, period=30):
+    """NUEVO: Precio Promedio Ponderado por Volumen (Huella Institucional)"""
+    return (df['cierre'] * df['volumen']).rolling(period).sum() / df['volumen'].rolling(period).sum()
 
 def calcular_bollinger_bands(series, period=20, std_dev=2):
     middle = series.rolling(window=period).mean()
@@ -198,7 +202,6 @@ def auditar_memoria(exchange, horizonte_dias=HORIZONTE_VALIDACION):
             except Exception: pass
     if cambios:
         df_memoria.to_csv(ARCHIVO_MEMORIA, index=False)
-        print("🧠 Auditoría completada: El bot ha evaluado sus predicciones pasadas.")
 
 def calcular_riesgo_dinamico(riesgo_base=0.01):
     if not os.path.exists(ARCHIVO_MEMORIA): return riesgo_base, "SIN DATOS" 
@@ -269,7 +272,7 @@ def enviar_alerta_telegram(mensaje):
         try:
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
                           json={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}, timeout=15)
-        except Exception as e: print(f"⚠️ Error enviando Telegram: {e}")
+        except Exception: pass
 
 def cargar_estado():
     if os.path.exists(ESTADO_PATH):
@@ -282,30 +285,28 @@ def guardar_estado(estado):
     with open(ESTADO_PATH, 'w') as f: json.dump(estado, f, indent=2)
 
 def formatear_bloque_telegram(alertas):
-    """Genera el texto formateado para un bloque de criptomonedas, incluyendo las probabilidades de la IA."""
     txt = ""
     for o in alertas:
         txt += f"• *{o['simbolo']}* | `${o['precio']:,.4f}`\n  {o['etiqueta']}\n"
+        txt += f"  🛡️ *Trailing Stop (Salida dinámica):* `${o['trailing_stop']:,.4f}`\n"
         if o.get('prob_subida') is not None:
             txt += f"  🤖 *Probabilidad IA (14d):* 📈 `{o['prob_subida']:.1f}%` | 📉 `{o['prob_bajada']:.1f}%`\n"
     return txt
 
 # ==========================================================================
-# 5. ANÁLISIS DE ACTIVOS LARGO PLAZO
+# 5. ANÁLISIS DE ACTIVOS LARGO PLAZO (AHORA CON VWMA Y CAMBIO DE ESTRATEGIA)
 # ==========================================================================
-def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, rsi_compra, rsi_venta, sobreprecio_pct, riesgo_aplicado, es_crecimiento=False):
+def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, rsi_compra, rsi_venta, sobreprecio_pct, riesgo_aplicado, tipo_estrategia="REVERSION"):
     velas = descargar_velas_cerradas(exchange, simbolo, temporalidad, VELAS_ANALISIS)
     if not velas or len(velas) < 60: return None
 
     df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
     
-    # 1. Indicadores Base
     df['RSI'] = calcular_rsi(df['cierre'], 14)
-    df['Media_30'] = df['cierre'].rolling(30).mean()
+    df['VWMA_30'] = calcular_vwma(df, 30) # REEMPLAZO INSTITUCIONAL DE LA MEDIA MÓVIL
     df['ATR'] = calcular_atr(df, 14)
     df['ADX'] = calcular_adx(df, 14)
     
-    # 2. Matemáticas Cuantitativas para alimentar a XGBoost
     df['Hurst'] = df['cierre'].rolling(window=30).apply(calcular_hurst, raw=False)
     df['Pendiente_Reg'] = df['cierre'].rolling(window=20).apply(lambda s: calcular_regresion_lineal(s)[0], raw=False)
     df['R2_Tendencia'] = df['cierre'].rolling(window=20).apply(lambda s: calcular_regresion_lineal(s)[1], raw=False)
@@ -317,32 +318,43 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
     if len(df) == 0: return None
     
     ultima = df.iloc[-1]
-    precio, rsi, media_30, atr = ultima['cierre'], ultima['RSI'], ultima['Media_30'], ultima['ATR']
+    precio, rsi, vwma_30, atr = ultima['cierre'], ultima['RSI'], ultima['VWMA_30'], ultima['ATR']
     
-    # 3. Lógica de Inversión
-    condicion_descuento = (df['cierre'] <= df['Media_30'] * (1 - descuento_pct)) | (df['RSI'] < rsi_compra)
-    condicion_sobrecompra = df['RSI'] >= rsi_venta
-    prefijo = "⚠️ *(Alta Volatilidad):* " if es_crecimiento else ""
+    trailing_stop = precio - (atr * 2.5) # Chandelier Exit Básico
+    prefijo = "⚠️ *(Alta Volatilidad):* " if tipo_estrategia == "MOMENTUM" else ""
 
-    if precio <= (media_30 * (1 - descuento_pct)) or rsi < rsi_compra:
-        accion, etiqueta, validacion = "COMPRAR", f"{prefijo}🟢 *COMPRAR:* Activo en descuento.", validar_senal_historica(df, condicion_descuento.values)
-    elif rsi >= rsi_venta:
-        accion, etiqueta, validacion = "EVALUAR_VENTA", f"{prefijo}🟡 *TOMAR BENEFICIOS:* Euforia extrema. Vender fracción.", validar_senal_historica(df, condicion_sobrecompra.values)
-    elif precio > (media_30 * (1 + sobreprecio_pct)):
-        accion, etiqueta, validacion = "ESPERAR", f"{prefijo}🔴 *ESPERAR:* Precio elevado.", None
-    else:
-        accion, etiqueta, validacion = "NEUTRO", f"{prefijo}⚪ *ZONA NEUTRA:* Mercado estable.", None
+    # LÓGICA DE INVERSIÓN BIFURCADA
+    if tipo_estrategia == "REVERSION":
+        condicion_descuento = (df['cierre'] <= df['VWMA_30'] * (1 - descuento_pct)) | (df['RSI'] < rsi_compra)
+        condicion_sobrecompra = df['RSI'] >= rsi_venta
+        if precio <= (vwma_30 * (1 - descuento_pct)) or rsi < rsi_compra:
+            accion, etiqueta, validacion = "COMPRAR", f"{prefijo}🟢 *COMPRAR:* Activo en descuento bajo VWMA.", validar_senal_historica(df, condicion_descuento.values)
+        elif rsi >= rsi_venta:
+            accion, etiqueta, validacion = "EVALUAR_VENTA", f"{prefijo}🟡 *TOMAR BENEFICIOS:* Euforia extrema.", validar_senal_historica(df, condicion_sobrecompra.values)
+        elif precio > (vwma_30 * (1 + sobreprecio_pct)):
+            accion, etiqueta, validacion = "ESPERAR", f"{prefijo}🔴 *ESPERAR:* Precio inflado sobre volumen.", None
+        else:
+            accion, etiqueta, validacion = "NEUTRO", f"{prefijo}⚪ *ZONA NEUTRA:* Mercado estable.", None
+            
+    elif tipo_estrategia == "MOMENTUM":
+        # NUEVO PARADIGMA: No atrapar cuchillos en alto riesgo, operar la tendencia fuerte.
+        condicion_momentum = (df['cierre'] > df['VWMA_30']) & (df['RSI'] > 55) & (df['RSI'] < 75)
+        condicion_caida = (df['RSI'] >= 80) | (df['cierre'] < df['VWMA_30'] * 0.95)
+        if precio > vwma_30 and 55 < rsi < 75:
+            accion, etiqueta, validacion = "COMPRAR", f"🔥 *COMPRAR (MOMENTUM):* Tendencia fuerte sobre VWMA.", validar_senal_historica(df, condicion_momentum.values)
+        elif rsi >= 80 or precio < (vwma_30 * 0.95):
+            accion, etiqueta, validacion = "EVALUAR_VENTA", f"🟡 *CORTAR / BENEFICIOS:* Tendencia agotada.", validar_senal_historica(df, condicion_caida.values)
+        else:
+            accion, etiqueta, validacion = "NEUTRO", f"⚪ *ZONA NEUTRA:* Sin fuerza direccional.", None
 
     denominador_atr = max(atr * 2.5, 0.0001)
     sugerencia_tamano = CAPITAL_REFERENCIA_USD * riesgo_aplicado / denominador_atr
-
-    # 4. Cálculo de Probabilidad IA para TODAS las monedas
     prob_subida, prob_bajada = inferir_probabilidad_xgboost(df)
 
     return {
-        'simbolo': simbolo, 'precio': precio, 'rsi': rsi, 'media_30': media_30, 
+        'simbolo': simbolo, 'precio': precio, 'rsi': rsi, 'vwma_30': vwma_30, 
         'accion': accion, 'etiqueta': etiqueta, 'validacion': validacion, 
-        'sugerencia_tamano': sugerencia_tamano, 'atr': atr, 
+        'sugerencia_tamano': sugerencia_tamano, 'atr': atr, 'trailing_stop': trailing_stop,
         'prob_subida': prob_subida, 'prob_bajada': prob_bajada
     }
 
@@ -355,41 +367,52 @@ def ejecutar_bot_maestro():
     
     auditar_memoria(exchange)
     riesgo_dinamico, estado_racha = calcular_riesgo_dinamico(RIESGO_POR_TRADE)
-    print(f"⚖️ Riesgo dinámico ajustado a: {riesgo_dinamico*100:.2f}% | Racha: {estado_racha}")
     
     estado_anterior, estado_nuevo = cargar_estado(), {}
     alertas_nucleo, alertas_crecimiento, alertas_seguimiento, alertas_alto_riesgo, alertas_satelite = [], [], [], [], []
 
+    # NUEVO: Detector de Altseason (Capital Flow)
     velas_btc = descargar_velas_cerradas(exchange, 'BTC/USDT', TEMPORALIDAD_ESCUDO, VELAS_ESCUDO_BTC)
+    velas_eth = descargar_velas_cerradas(exchange, 'ETH/USDT', TEMPORALIDAD_ESCUDO, 30)
     regimen_macro = "DESCONOCIDO"
+    altseason_estado = "DESCONOCIDO"
+    
     if velas_btc:
         df_btc = pd.DataFrame(velas_btc, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
         regimen_macro = detectar_regimen_kmeans(df_btc)
+        if velas_eth:
+            df_eth = pd.DataFrame(velas_eth, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+            rend_btc = (df_btc['cierre'].iloc[-1] / df_btc['cierre'].iloc[-30]) - 1
+            rend_eth = (df_eth['cierre'].iloc[-1] / df_eth['cierre'].iloc[0]) - 1
+            altseason_estado = "🟢 ON (Rotación a Alts)" if rend_eth > rend_btc else "🔴 OFF (Dominancia BTC)"
 
     for s in NUCLEO_CONSERVADOR:
-        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_NUCLEO, 0.04, 40, 75, 0.05, riesgo_dinamico, False):
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_NUCLEO, 0.04, 40, 75, 0.05, riesgo_dinamico, "REVERSION"):
             alertas_nucleo.append(r)
             estado_nuevo[s] = r['accion']
 
     for s in NIVEL_CRECIMIENTO:
-        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_CRECIMIENTO, 0.07, 35, 80, 0.08, riesgo_dinamico, True):
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_CRECIMIENTO, 0.07, 35, 80, 0.08, riesgo_dinamico, "REVERSION"):
             alertas_crecimiento.append(r)
             estado_nuevo[s] = r['accion']
 
     for s in SEGUIMIENTO_ESTRATEGICO:
-        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_SEGUIMIENTO, 0.06, 35, 78, 0.07, riesgo_dinamico, True):
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_SEGUIMIENTO, 0.06, 35, 78, 0.07, riesgo_dinamico, "REVERSION"):
             alertas_seguimiento.append(r)
             estado_nuevo[s] = r['accion']
 
-    for s in ALTO_RIESGO:
-        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_ALTO_RIESGO, 0.08, 30, 80, 0.10, riesgo_dinamico, True):
+    for s in ALTO_RIESGO: # Aplica la nueva estrategia de Momentum
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_ALTO_RIESGO, 0.08, 30, 80, 0.10, riesgo_dinamico, "MOMENTUM"):
             alertas_alto_riesgo.append(r)
             estado_nuevo[s] = r['accion']
 
+    # BLOQUE SATÉLITE CON MATRIZ DE CORRELACIÓN
     try:
         tickers = exchange.fetch_tickers()
         excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_CRECIMIENTO) | set(SEGUIMIENTO_ESTRATEGICO) | set(ALTO_RIESGO)
-        candidatas = sorted([s for s, t in tickers.items() if '/USDT' in s and s not in excluidos and es_mercado_spot_valido(exchange, s) and t.get('quoteVolume', 0) > 1000000], key=lambda s: tickers[s].get('quoteVolume', 0), reverse=True)[:10]
+        candidatas = sorted([s for s, t in tickers.items() if '/USDT' in s and s not in excluidos and es_mercado_spot_valido(exchange, s) and t.get('quoteVolume', 0) > 1500000], key=lambda s: tickers[s].get('quoteVolume', 0), reverse=True)[:15]
+
+        historico_candidatas_aceptadas = {} # Guarda precios para correlación
 
         for s in candidatas:
             velas = descargar_velas_cerradas(exchange, s, TEMPORALIDAD_SATELITE, VELAS_ANALISIS)
@@ -397,7 +420,7 @@ def ejecutar_bot_maestro():
             
             df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
             df['RSI'], _, df['BB_Lower'] = calcular_rsi(df['cierre'], 14), None, calcular_bollinger_bands(df['cierre'])[2]
-            df['Vol_Medio'], df['ATR'], df['ADX'] = df['volumen'].rolling(20).mean(), calcular_atr(df, 14), calcular_adx(df, 14)
+            df['VWMA_20'], df['ATR'], df['ADX'] = calcular_vwma(df, 20), calcular_atr(df, 14), calcular_adx(df, 14)
             df['Max_20'] = df['cierre'].shift(1).rolling(20).max()
             
             df['Hurst'] = df['cierre'].rolling(window=30).apply(calcular_hurst, raw=False)
@@ -418,37 +441,45 @@ def ejecutar_bot_maestro():
                 cuantitativo_ok = False
                 breakout_ok = False
             elif regimen_macro == "LATERAL":
-                cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['volumen'] >= ultima['Vol_Medio'] * 0.7)
+                cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['cierre'] < ultima['VWMA_20'])
                 breakout_ok = False 
             else: 
                 cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['ADX'] < SATELITE_ADX_MAX)
-                breakout_ok = (ultima['cierre'] > ultima['Max_20']) and (ultima['volumen'] >= ultima['Vol_Medio'] * 1.5) and (ultima['ADX'] > 25) and ultima['CRT_Valida'] == 1
+                breakout_ok = (ultima['cierre'] > ultima['Max_20']) and (ultima['cierre'] > ultima['VWMA_20']) and (ultima['ADX'] > 25) and ultima['CRT_Valida'] == 1
 
-            if cuantitativo_ok:
-                sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
-                val = validar_senal_historica(df, (df['RSI'] <= SATELITE_RSI_ENTRADA) & (df['cierre'] <= df['BB_Lower'] * 1.01))
+            if cuantitativo_ok or breakout_ok or patron_smc:
+                # NUEVO: Escudo de Correlación
+                correlacion_peligrosa = False
+                cierre_actual = df['cierre'].tail(50).values
+                for s_aceptado, cierre_aceptado in historico_candidatas_aceptadas.items():
+                    if len(cierre_actual) == len(cierre_aceptado):
+                        corr = np.corrcoef(cierre_actual, cierre_aceptado)[0, 1]
+                        if corr > 0.85:
+                            correlacion_peligrosa = True
+                            break
+                if correlacion_peligrosa:
+                    continue # Descarta la moneda si es matemáticamente idéntica a otra ya detectada
+
+                historico_candidatas_aceptadas[s] = cierre_actual # Guarda para comparar futuras
                 prob_subida, prob_bajada = inferir_probabilidad_xgboost(df)
                 
-                if prob_subida is not None: registrar_prediccion(s, ultima['cierre'], ultima['RSI'], ultima['ATR'], ultima['ADX'], ultima['volumen'], ultima['Hurst'], ultima['Pendiente_Reg'], ultima['R2_Tendencia'], ultima['CRT_Valida'], prob_subida)
-                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'CUANTITATIVO_REVERSION', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * riesgo_dinamico / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada})
-                estado_nuevo[s] = 'CUANTITATIVO_REVERSION'
-                
-            elif breakout_ok:
-                sl, tp = ultima['cierre'] - (1.5 * ultima['ATR']), ultima['cierre'] + (3.0 * ultima['ATR'])
-                val = validar_senal_historica(df, (df['cierre'] > df['cierre'].shift(1).rolling(20).max()) & (df['volumen'] >= ultima['Vol_Medio'] * 1.5))
-                prob_subida, prob_bajada = inferir_probabilidad_xgboost(df)
+                if cuantitativo_ok:
+                    tipo_al = 'CUANTITATIVO_REVERSION'
+                    sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
+                    val = validar_senal_historica(df, (df['RSI'] <= SATELITE_RSI_ENTRADA) & (df['cierre'] <= df['BB_Lower'] * 1.01))
+                elif breakout_ok:
+                    tipo_al = 'BREAKOUT_MOMENTUM_CRT'
+                    sl, tp = ultima['cierre'] - (1.5 * ultima['ATR']), ultima['cierre'] + (3.0 * ultima['ATR'])
+                    val = validar_senal_historica(df, (df['cierre'] > df['cierre'].shift(1).rolling(20).max()) & (df['cierre'] > ultima['VWMA_20']))
+                else:
+                    tipo_al = patron_smc['tipo']
+                    sl, tp = patron_smc['sl'], patron_smc['tp']
+                    val = validar_senal_historica(df, hist_alc if patron_smc['tipo'] == "SMC_ALCISTA" else hist_baj)
 
                 if prob_subida is not None: registrar_prediccion(s, ultima['cierre'], ultima['RSI'], ultima['ATR'], ultima['ADX'], ultima['volumen'], ultima['Hurst'], ultima['Pendiente_Reg'], ultima['R2_Tendencia'], ultima['CRT_Valida'], prob_subida)
-                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': 'BREAKOUT_MOMENTUM_CRT', 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * riesgo_dinamico / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada})
-                estado_nuevo[s] = 'BREAKOUT_MOMENTUM_CRT'
-                
-            elif patron_smc:
-                val_smc = validar_senal_historica(df, hist_alc if patron_smc['tipo'] == "SMC_ALCISTA" else hist_baj)
-                prob_subida, prob_bajada = inferir_probabilidad_xgboost(df)
-                
-                if prob_subida is not None: registrar_prediccion(s, ultima['cierre'], ultima['RSI'], ultima['ATR'], ultima['ADX'], ultima['volumen'], ultima['Hurst'], ultima['Pendiente_Reg'], ultima['R2_Tendencia'], ultima['CRT_Valida'], prob_subida)
-                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': patron_smc['tipo'], 'tp': patron_smc['tp'], 'sl': patron_smc['sl'], 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * riesgo_dinamico / max(abs(ultima['cierre'] - patron_smc['sl']), 0.0001), 'validacion': val_smc, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada})
-                estado_nuevo[s] = patron_smc['tipo']
+                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': tipo_al, 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * riesgo_dinamico / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada})
+                estado_nuevo[s] = tipo_al
+
     except Exception as e:
         print(f"⚠️ Error procesando el bloque satélite: {e}")
 
@@ -462,20 +493,21 @@ def ejecutar_bot_maestro():
     s_env = [a for a in alertas_satelite if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], a['tipo_alerta'])]
 
     if n_env or c_env or seg_env or ar_env or s_env:
-        msj = f"🚨 *REPORTE IA (MULTI-BLOQUE)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+        msj = f"🚨 *REPORTE IA (INSTITUCIONAL)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
         msj += f"🌐 *Régimen Macro:* `{regimen_macro}`\n"
+        msj += f"🔄 *Flujo de Capital:* `{altseason_estado}`\n"
         msj += f"🧠 *Racha IA:* `{estado_racha}` | Riesgo actual: `{riesgo_dinamico*100:.2f}%`\n\n"
         
         if n_env:
             msj += "🛡️ *NÚCLEO CONSERVADOR*\n" + formatear_bloque_telegram(n_env) + "\n"
         if c_env:
-            msj += "🚀 *CRECIMIENTO PRINCIPAL*\n" + formatear_bloque_telegram(c_env) + "\n"
+            msj += "🚀 *CRECIMIENTO (IA & TECH)*\n" + formatear_bloque_telegram(c_env) + "\n"
         if seg_env:
-            msj += "📊 *SEGUIMIENTO ESTRATÉGICO*\n" + formatear_bloque_telegram(seg_env) + "\n"
+            msj += "📊 *SEGUIMIENTO (L1 & RWA)*\n" + formatear_bloque_telegram(seg_env) + "\n"
         if ar_env:
-            msj += "🔥 *APUESTAS DE ALTO RIESGO*\n" + formatear_bloque_telegram(ar_env) + "\n"
+            msj += "🔥 *ALTO RIESGO (MEMES & POW)*\n" + formatear_bloque_telegram(ar_env) + "\n"
         if s_env:
-            msj += f"🎯 *RADAR DE ALTO RIESGO ({TEMPORALIDAD_SATELITE})*\n"
+            msj += f"🎯 *RADAR DE PRECISIÓN ({TEMPORALIDAD_SATELITE})*\n_Filtro Antidumping Activo_\n"
             for o in s_env:
                 emoji = '🟢' if 'ALCISTA' in o['tipo_alerta'] or 'REVERSION' in o['tipo_alerta'] or 'BREAKOUT' in o['tipo_alerta'] else '🔴'
                 msj += f"{emoji} *{o['tipo_alerta'].replace('_', ' ')}* | *{o['simbolo']}*\n  Entrada: `${o['precio']:,.4f}`\n  🎯 TP: `${o['tp']:,.4f}` | 🛑 SL: `${o['sl']:,.4f}`\n  📏 Tamaño sugerido: `{o['sugerencia_tamano']:,.2f}` UND\n"
@@ -485,10 +517,7 @@ def ejecutar_bot_maestro():
                     
                 if o['validacion'] and o['validacion']['suficiente']:
                     msj += f"  📊 Histórico: Win Rate {o['validacion']['win_rate']:.0f}%, Promedio {o['validacion']['retorno_promedio']:+.1f}%\n"
-                    if o['validacion']['mc_confianza'] is not None:
-                        msj += f"  🎲 *Monte Carlo Edge:* `{o['validacion']['mc_confianza']:.1f}%` prob. de ser rentable.\n"
-                msj += "\n"
-        msj += "_⚠️ Herramienta de apoyo analítico basada en IA. Verifique siempre antes de operar._"
+        msj += "\n_⚠️ Herramienta cuantitativa avanzada. Gestión de riesgo requerida._"
         enviar_alerta_telegram(msj)
     
     guardar_estado(estado_nuevo)
