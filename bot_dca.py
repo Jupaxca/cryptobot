@@ -230,7 +230,15 @@ def registrar_prediccion(simbolo, precio, rsi, atr, adx, vol, hurst, slope, r2, 
 def auditar_memoria(exchange, horizonte_dias=HORIZONTE_VALIDACION):
     if not os.path.exists(ARCHIVO_MEMORIA):
         return
-    df_memoria = pd.read_csv(ARCHIVO_MEMORIA)
+    try:
+        if os.path.getsize(ARCHIVO_MEMORIA) == 0:
+            return
+        df_memoria = pd.read_csv(ARCHIVO_MEMORIA)
+        if df_memoria.empty:
+            return
+    except Exception:
+        return
+
     df_memoria['timestamp'] = pd.to_datetime(df_memoria['timestamp'])
     ahora = datetime.now(timezone.utc)
     pendientes = df_memoria[df_memoria['exito_real'].isna()]
@@ -257,7 +265,15 @@ def auditar_memoria(exchange, horizonte_dias=HORIZONTE_VALIDACION):
 def calcular_riesgo_dinamico(riesgo_base=0.01):
     if not os.path.exists(ARCHIVO_MEMORIA):
         return riesgo_base, "SIN DATOS"
-    df_mem = pd.read_csv(ARCHIVO_MEMORIA)
+    try:
+        if os.path.getsize(ARCHIVO_MEMORIA) == 0:
+            return riesgo_base, "SIN DATOS"
+        df_mem = pd.read_csv(ARCHIVO_MEMORIA)
+        if df_mem.empty:
+            return riesgo_base, "SIN DATOS"
+    except Exception:
+        return riesgo_base, "SIN DATOS"
+
     auditadas = df_mem.dropna(subset=['exito_real'])
     if len(auditadas) < MIN_CASOS_RIESGO_DINAMICO:
         return riesgo_base, f"RECOPILANDO ({len(auditadas)}/{MIN_CASOS_RIESGO_DINAMICO})"
@@ -302,13 +318,17 @@ def inferir_probabilidad_xgboost(df, simbolo_actual):
         y = df_ml[:-HORIZONTE_VALIDACION]['exito']
 
         if os.path.exists(ARCHIVO_MEMORIA):
-            df_mem = pd.read_csv(ARCHIVO_MEMORIA)
-            df_mem = df_mem[(df_mem['simbolo'] == simbolo_actual) & (df_mem['exito_real'].notna())]
-            if not df_mem.empty and all(f in df_mem.columns for f in features):
-                X_memoria = df_mem[features]
-                y_memoria = df_mem['exito_real']
-                X = pd.concat([X, X_memoria], ignore_index=True)
-                y = pd.concat([y, y_memoria], ignore_index=True)
+            try:
+                if os.path.getsize(ARCHIVO_MEMORIA) > 0:
+                    df_mem = pd.read_csv(ARCHIVO_MEMORIA)
+                    df_mem = df_mem[(df_mem['simbolo'] == simbolo_actual) & (df_mem['exito_real'].notna())]
+                    if not df_mem.empty and all(f in df_mem.columns for f in features):
+                        X_memoria = df_mem[features]
+                        y_memoria = df_mem['exito_real']
+                        X = pd.concat([X, X_memoria], ignore_index=True)
+                        y = pd.concat([y, y_memoria], ignore_index=True)
+            except Exception:
+                pass
 
         if len(X) < 40 or y.nunique() < 2:
             return None, None
@@ -328,20 +348,24 @@ def inferir_probabilidad_xgboost(df, simbolo_actual):
 
 
 # ==========================================================================
-# 4. TELEGRAM CON DIVISIÓN AUTOMÁTICA DE MENSAJES LARGOS (>4000 CARACTERES)
+# 4. TELEGRAM (TEXTO PLANO Y FRAGMENTADO PARA EVITAR ERRORES DE SINTAXIS)
 # ==========================================================================
 def enviar_alerta_telegram(mensaje):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("❌ ERROR: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID no están definidos en el entorno.")
         return
     
+    # Limpiamos asteriscos o acentos graves para prevenir cualquier error de formato en Telegram
+    mensaje_plano = mensaje.replace('*', '').replace('`', '')
+    
     max_length = 4000
-    mensajes = [mensaje[i:i+max_length] for i in range(0, len(mensaje), max_length)]
+    mensajes = [mensaje_plano[i:i+max_length] for i in range(0, len(mensaje_plano), max_length)]
     
     for idx, msg_chunk in enumerate(mensajes):
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg_chunk, "parse_mode": "Markdown"}
+            # Omitimos parse_mode para enviar texto plano seguro
+            payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg_chunk}
             response = requests.post(url, json=payload, timeout=15)
             
             print(f"📡 Código de respuesta de Telegram (Parte {idx+1}): {response.status_code}")
@@ -370,10 +394,10 @@ def guardar_estado(estado):
 def formatear_bloque_telegram(alertas):
     txt = ""
     for o in alertas:
-        txt += f"• *{o['simbolo']}* | `${o['precio']:,.4f}`\n  {o['etiqueta']}\n"
-        txt += f"  🛡️ *Trailing Stop:* `${o['trailing_stop']:,.4f}`\n"
+        txt += f"• {o['simbolo']} | ${o['precio']:,.4f}\n  {o['etiqueta']}\n"
+        txt += f"  Trailing Stop: ${o['trailing_stop']:,.4f}\n"
         if o.get('prob_subida') is not None:
-            txt += f"  🤖 *Probabilidad IA:* 📈 `{o['prob_subida']:.1f}%` | 📉 `{o['prob_bajada']:.1f}%`\n"
+            txt += f"  Probabilidad IA: 📈 {o['prob_subida']:.1f}% | 📉 {o['prob_bajada']:.1f}%\n"
     return txt
 
 
@@ -407,29 +431,29 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
     ultima = df.iloc[-1]
     precio, rsi, vwma_30, atr = ultima['cierre'], ultima['RSI'], ultima['VWMA_30'], ultima['ATR']
     trailing_stop = precio - (atr * 2.5)
-    prefijo = "⚠️ *(Alta Volatilidad):* " if tipo_estrategia == "MOMENTUM" else ""
+    prefijo = "*(Alta Volatilidad):* " if tipo_estrategia == "MOMENTUM" else ""
 
     if tipo_estrategia == "REVERSION":
         condicion_descuento = (df['cierre'] <= df['VWMA_30'] * (1 - descuento_pct)) | (df['RSI'] < rsi_compra)
         condicion_sobrecompra = df['RSI'] >= rsi_venta
         if precio <= (vwma_30 * (1 - descuento_pct)) or rsi < rsi_compra:
-            accion, etiqueta, validacion = "COMPRAR", f"{prefijo}🟢 *COMPRAR:* Activo en descuento bajo VWMA.", validar_senal_historica(df, condicion_descuento.values)
+            accion, etiqueta, validacion = "COMPRAR", f"{prefijo}🟢 COMPRAR: Activo en descuento bajo VWMA.", validar_senal_historica(df, condicion_descuento.values)
         elif rsi >= rsi_venta:
-            accion, etiqueta, validacion = "EVALUAR_VENTA", f"{prefijo}🟡 *TOMAR BENEFICIOS:* Euforia extrema.", validar_senal_historica(df, condicion_sobrecompra.values)
+            accion, etiqueta, validacion = "EVALUAR_VENTA", f"{prefijo}🟡 TOMAR BENEFICIOS: Euforia extrema.", validar_senal_historica(df, condicion_sobrecompra.values)
         elif precio > (vwma_30 * (1 + sobreprecio_pct)):
-            accion, etiqueta, validacion = "ESPERAR", f"{prefijo}🔴 *ESPERAR:* Precio inflado sobre volumen.", None
+            accion, etiqueta, validacion = "ESPERAR", f"{prefijo}🔴 ESPERAR: Precio inflado sobre volumen.", None
         else:
-            accion, etiqueta, validacion = "NEUTRO", f"{prefijo}⚪ *ZONA NEUTRA:* Mercado estable.", None
+            accion, etiqueta, validacion = "NEUTRO", f"{prefijo}⚪ ZONA NEUTRA: Mercado estable.", None
 
     elif tipo_estrategia == "MOMENTUM":
         condicion_momentum = (df['cierre'] > df['VWMA_30']) & (df['RSI'] > 55) & (df['RSI'] < 75)
         condicion_caida = (df['RSI'] >= 80) | (df['cierre'] < df['VWMA_30'] * 0.95)
         if precio > vwma_30 and 55 < rsi < 75:
-            accion, etiqueta, validacion = "COMPRAR", f"🔥 *COMPRAR (MOMENTUM):* Tendencia fuerte sobre VWMA.", validar_senal_historica(df, condicion_momentum.values)
+            accion, etiqueta, validacion = "COMPRAR", f"🔥 COMPRAR (MOMENTUM): Tendencia fuerte sobre VWMA.", validar_senal_historica(df, condicion_momentum.values)
         elif rsi >= 80 or precio < (vwma_30 * 0.95):
-            accion, etiqueta, validacion = "EVALUAR_VENTA", f"🟡 *CORTAR / BENEFICIOS:* Tendencia agotada.", validar_senal_historica(df, condicion_caida.values)
+            accion, etiqueta, validacion = "EVALUAR_VENTA", f"🟡 CORTAR / BENEFICIOS: Tendencia agotada.", validar_senal_historica(df, condicion_caida.values)
         else:
-            accion, etiqueta, validacion = "NEUTRO", f"⚪ *ZONA NEUTRA:* Sin fuerza direccional.", None
+            accion, etiqueta, validacion = "NEUTRO", f"⚪ ZONA NEUTRA: Sin fuerza direccional.", None
 
     denominador_atr = max(atr * 2.5, 0.0001)
     sugerencia_tamano = CAPITAL_REFERENCIA_USD * riesgo_aplicado / denominador_atr
@@ -557,7 +581,7 @@ def ejecutar_bot_maestro():
 
                 if cuantitativo_ok:
                     tipo_al = 'CUANTITATIVO_REVERSION'
-                    sl, tp = ultima['cierre'] - (SATELENT_ATR_SL_MULT * ultima['ATR']) if 'SATELENT_ATR_SL_MULT' in globals() else ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
+                    sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
                     val = validar_senal_historica(df, (df['RSI'] <= SATELITE_RSI_ENTRADA) & (df['cierre'] <= df['BB_Lower'] * 1.01))
                 elif breakout_ok:
                     tipo_al = 'BREAKOUT_MOMENTUM_CRT'
@@ -580,38 +604,38 @@ def ejecutar_bot_maestro():
         print(f"⚠️ Error procesando el bloque satélite: {e}")
 
     # ==========================================================================
-    # ENVÍO INCONDICIONAL A TELEGRAM (CON FRAGMENTACIÓN DE MENSAJES)
+    # ENVÍO INCONDICIONAL A TELEGRAM (TEXTO PLANO / SEGURO)
     # ==========================================================================
     todas_las_alertas_largo_plazo = alertas_nucleo + alertas_crecimiento + alertas_seguimiento + alertas_alto_riesgo
 
-    msj = f"🚨 *REPORTE IA (INSTITUCIONAL)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
-    msj += f"🌐 *Régimen Macro:* `{regimen_macro}`\n"
-    msj += f"🔄 *Flujo de Capital:* `{altseason_estado}`\n"
-    msj += f"🧠 *Racha IA:* `{estado_racha}` | Riesgo actual: `{riesgo_dinamico*100:.2f}%`\n\n"
+    msj = f"🚨 REPORTE IA (INSTITUCIONAL) — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+    msj += f"🌐 Régimen Macro: {regimen_macro}\n"
+    msj += f"🔄 Flujo de Capital: {altseason_estado}\n"
+    msj += f"🧠 Racha IA: {estado_racha} | Riesgo actual: {riesgo_dinamico*100:.2f}%\n\n"
 
     if todas_las_alertas_largo_plazo:
-        msj += "📊 *ESTADO GENERAL DEL PORTAFOLIO*\n"
+        msj += "📊 ESTADO GENERAL DEL PORTAFOLIO\n"
         for o in todas_las_alertas_largo_plazo:
-            msj += f"• *{o['simbolo']}* | `${o['precio']:,.4f}`\n  {o['etiqueta']}\n"
-            msj += f"  🛡️ *Trailing Stop:* `${o['trailing_stop']:,.4f}`\n"
+            msj += f"• {o['simbolo']} | ${o['precio']:,.4f}\n  {o['etiqueta']}\n"
+            msj += f"  🛡️ Trailing Stop: ${o['trailing_stop']:,.4f}\n"
             if o.get('prob_subida') is not None:
-                msj += f"  🤖 *Probabilidad IA:* 📈 `{o['prob_subida']:.1f}%` | 📉 `{o['prob_bajada']:.1f}%`\n"
+                msj += f"  🤖 Probabilidad IA: 📈 {o['prob_subida']:.1f}% | 📉 {o['prob_bajada']:.1f}%\n"
         msj += "\n"
 
     if alertas_satelite:
-        msj += f"🎯 *RADAR DE PRECISIÓN ({TEMPORALIDAD_SATELITE})*\n"
+        msj += f"🎯 RADAR DE PRECISIÓN ({TEMPORALIDAD_SATELITE})\n"
         for o in alertas_satelite:
             emoji = '🟢' if 'ALCISTA' in o['tipo_alerta'] or 'REVERSION' in o['tipo_alerta'] or 'BREAKOUT' in o['tipo_alerta'] else '🔴'
-            msj += f"{emoji} *{o['tipo_alerta'].replace('_', ' ')}* | *{o['simbolo']}*\n  Entrada: `${o['precio']:,.4f}`\n  🎯 TP: `${o['tp']:,.4f}` | 🛑 SL: `${o['sl']:,.4f}`\n"
+            msj += f"{emoji} {o['tipo_alerta'].replace('_', ' ')} | {o['simbolo']}\n  Entrada: ${o['precio']:,.4f}\n  🎯 TP: ${o['tp']:,.4f} | 🛑 SL: ${o['sl']:,.4f}\n"
             if o.get('prob_subida') is not None:
-                msj += f"  🤖 *Probabilidad IA:* 📈 `{o['prob_subida']:.1f}%` | 📉 `{o['prob_bajada']:.1f}%`\n"
+                msj += f"  🤖 Probabilidad IA: 📈 {o['prob_subida']:.1f}% | 📉 {o['prob_bajada']:.1f}%\n"
             if o['validacion'] and o['validacion']['suficiente']:
                 msj += f"  📊 Histórico (con comisiones): Win Rate {o['validacion']['win_rate']:.0f}%\n"
             elif o['validacion'] and o['validacion']['n_casos'] > 0:
                 msj += f"  ⚠️ Solo {o['validacion']['n_casos']} casos históricos — poco confiable\n"
         msj += "\n"
     else:
-        msj += f"🎯 *RADAR DE PRECISIÓN ({TEMPORALIDAD_SATELITE})*\n  ⚪ Sin señales activas en este ciclo.\n\n"
+        msj += f"🎯 RADAR DE PRECISIÓN ({TEMPORALIDAD_SATELITE})\n  ⚪ Sin señales activas en este ciclo.\n\n"
 
     msj += "_⚠️ Herramienta cuantitativa. No constituye asesoría financiera personalizada._"
 
