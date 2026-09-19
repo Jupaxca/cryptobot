@@ -51,8 +51,6 @@ HORIZONTE_VALIDACION = 14
 COMISION_EXCHANGE = 0.001
 SLIPPAGE = 0.0005
 
-# FIX: 10 casos era muy poca muestra para mover el riesgo real ±50%.
-# Se sube al mínimo que venimos usando en todo el proyecto (20).
 MIN_CASOS_RIESGO_DINAMICO = 20
 
 # ==========================================================================
@@ -106,15 +104,6 @@ def calcular_adx(df, period=14):
 
 
 def calcular_hurst_vectorizado(series, window=100, max_lag=20):
-    """
-    NOTA: sigue siendo un bucle (el nombre "vectorizado" de la versión
-    anterior era engañoso — no había vectorización real). Se sube la
-    ventana de 30 a 100 velas: 30 es demasiado poco para que el exponente
-    de Hurst signifique algo estadísticamente; 100 sigue sin ser ideal,
-    pero es una mejora real. El costo en tiempo de ejecución es aceptable
-    porque esta operación en sí es barata (no es el cuello de botella —
-    el polyfit por vela sí lo es, pero corre sobre pocas decenas de lags).
-    """
     hursts = []
     vals = series.values
     for i in range(len(vals)):
@@ -223,7 +212,7 @@ def es_mercado_spot_valido(exchange, simbolo):
 
 
 # ==========================================================================
-# 3. MÓDULOS DE MEMORIA E IA AISLADA (SIN MEZCLA DE ACTIVOS)
+# 3. MÓDULOS DE MEMORIA E IA AISLADA
 # ==========================================================================
 def registrar_prediccion(simbolo, precio, rsi, atr, adx, vol, hurst, slope, r2, crt, prob_subida):
     nueva_fila = pd.DataFrame([{
@@ -339,15 +328,25 @@ def inferir_probabilidad_xgboost(df, simbolo_actual):
 
 
 # ==========================================================================
-# 4. TELEGRAM Y ESTADO
+# 4. TELEGRAM Y ESTADO (CON DIAGNÓSTICO DE CONEXIÓN)
 # ==========================================================================
 def enviar_alerta_telegram(mensaje):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        try:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                          json={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}, timeout=15)
-        except Exception:
-            pass
+    print(f"🔍 Intentando enviar alerta a Telegram para Chat ID: {TELEGRAM_CHAT_ID}...")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ ERROR: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID no están definidos en el entorno.")
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
+        response = requests.post(url, json=payload, timeout=15)
+        
+        print(f"📡 Código de respuesta de Telegram: {response.status_code}")
+        print(f"📦 Respuesta de Telegram: {response.text}")
+        
+        if response.status_code != 200:
+            print("❌ Telegram rechazó el mensaje. Revisa el token o el chat ID.")
+    except Exception as e:
+        print(f"❌ EXCEPCIÓN al conectar con Telegram: {e}")
 
 
 def cargar_estado():
@@ -578,7 +577,7 @@ def ejecutar_bot_maestro():
         print(f"⚠️ Error procesando el bloque satélite: {e}")
 
     # ==========================================================================
-    # ENVÍO INCONDICIONAL A TELEGRAM (REPORTE COMPLETO CADA 4 HORAS)
+    # ENVÍO INCONDICIONAL A TELEGRAM (REPORTE CADA 4H)
     # ==========================================================================
     todas_las_alertas_largo_plazo = alertas_nucleo + alertas_crecimiento + alertas_seguimiento + alertas_alto_riesgo
 
@@ -613,7 +612,6 @@ def ejecutar_bot_maestro():
 
     msj += "_⚠️ Herramienta cuantitativa. No constituye asesoría financiera personalizada._"
 
-    # Se dispara siempre en cada ejecución de 4h
     enviar_alerta_telegram(msj)
     guardar_estado(estado_nuevo)
 
