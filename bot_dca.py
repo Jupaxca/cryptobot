@@ -133,8 +133,6 @@ def calcular_hurst_vectorizado(series, window=100, max_lag=20):
 
 
 def calcular_regresion_rolling(series, window=20):
-    # FIX: el nombre tenía un espacio ("calcular_regresion_ rolling"), lo
-    # cual es un SyntaxError en Python — el archivo entero no cargaba.
     slopes, r2s = [], []
     vals = series.values
     for i in range(len(vals)):
@@ -156,15 +154,6 @@ def calcular_regresion_rolling(series, window=20):
 
 
 def detectar_patrones_smc_historico(df, ventana_estructura=15):
-    """
-    Reescritura de detectar_patrones_smc_corregido que SÍ produce un array
-    histórico (senales_alcistas / senales_bajistas) para poder validar de
-    verdad con validar_senal_historica, en vez del placeholder `cierre > 0`
-    que no medía nada relacionado con el patrón.
-
-    Cada punto i solo usa datos hasta i (sin mirar al futuro) — mismo
-    principio que ya corregimos antes en el script de un solo activo.
-    """
     n = len(df)
     senales_alcistas = np.zeros(n, dtype=bool)
     senales_bajistas = np.zeros(n, dtype=bool)
@@ -250,13 +239,6 @@ def registrar_prediccion(simbolo, precio, rsi, atr, adx, vol, hurst, slope, r2, 
 
 
 def auditar_memoria(exchange, horizonte_dias=HORIZONTE_VALIDACION):
-    """
-    FIX: antes se pedía `limit=delta_dias+2` sin un `since` explícito, lo
-    cual depende de una suposición sobre cómo cada exchange ordena/ancla
-    los resultados cuando no se pasa `since` — frágil y puede variar entre
-    exchanges. Ahora se ancla explícitamente a la fecha de entrada +
-    horizonte_dias, sin depender de ningún supuesto de orden implícito.
-    """
     if not os.path.exists(ARCHIVO_MEMORIA):
         return
     df_memoria = pd.read_csv(ARCHIVO_MEMORIA)
@@ -319,7 +301,6 @@ def detectar_regimen_kmeans(df_btc):
 
 
 def inferir_probabilidad_xgboost(df, simbolo_actual):
-    """IA con memoria filtrada por símbolo (evita mezclar activos distintos)."""
     try:
         df_ml = df.copy()
         df_ml['retorno_futuro'] = df_ml['cierre'].shift(-HORIZONTE_VALIDACION) / df_ml['cierre'] - 1
@@ -549,7 +530,7 @@ def ejecutar_bot_maestro():
             if regimen_macro == "BAJISTA":
                 cuantitativo_ok = False
                 breakout_ok = False
-                patron_smc = None  # FIX: antes SMC no se bloqueaba en régimen bajista, ahora sí
+                patron_smc = None
             elif regimen_macro == "LATERAL":
                 cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['cierre'] < ultima['VWMA_20'])
                 breakout_ok = False
@@ -583,9 +564,6 @@ def ejecutar_bot_maestro():
                 else:
                     tipo_al = patron_smc['tipo']
                     sl, tp = patron_smc['sl'], patron_smc['tp']
-                    # FIX: validación real con el array histórico del patrón,
-                    # en vez del placeholder `cierre > 0` (que no medía nada
-                    # relacionado con el patrón SMC).
                     condicion_smc = hist_alc_smc if patron_smc['tipo'] == "SMC_ALCISTA" else hist_baj_smc
                     val = validar_senal_historica(df, condicion_smc)
 
@@ -599,43 +577,44 @@ def ejecutar_bot_maestro():
     except Exception as e:
         print(f"⚠️ Error procesando el bloque satélite: {e}")
 
-    hubo_cambio = lambda s, a: estado_anterior.get(s) != a
-    filtrar = lambda l, c: [a for a in l if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], a.get('accion', c))]
+    # ==========================================================================
+    # ENVÍO INCONDICIONAL A TELEGRAM (REPORTE COMPLETO CADA 4 HORAS)
+    # ==========================================================================
+    todas_las_alertas_largo_plazo = alertas_nucleo + alertas_crecimiento + alertas_seguimiento + alertas_alto_riesgo
 
-    n_env = filtrar(alertas_nucleo, None)
-    c_env = filtrar(alertas_crecimiento, None)
-    seg_env = filtrar(alertas_seguimiento, None)
-    ar_env = filtrar(alertas_alto_riesgo, None)
-    s_env = [a for a in alertas_satelite if not SOLO_ALERTAR_CAMBIOS or hubo_cambio(a['simbolo'], a['tipo_alerta'])]
+    msj = f"🚨 *REPORTE IA (INSTITUCIONAL)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+    msj += f"🌐 *Régimen Macro:* `{regimen_macro}`\n"
+    msj += f"🔄 *Flujo de Capital:* `{altseason_estado}`\n"
+    msj += f"🧠 *Racha IA:* `{estado_racha}` | Riesgo actual: `{riesgo_dinamico*100:.2f}%`\n\n"
 
-    if n_env or c_env or seg_env or ar_env or s_env:
-        msj = f"🚨 *REPORTE IA (INSTITUCIONAL)* — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
-        msj += f"🌐 *Régimen Macro:* `{regimen_macro}`\n"
-        msj += f"🔄 *Flujo de Capital:* `{altseason_estado}`\n"
-        msj += f"🧠 *Racha IA:* `{estado_racha}` | Riesgo actual: `{riesgo_dinamico*100:.2f}%`\n\n"
+    if todas_las_alertas_largo_plazo:
+        msj += "📊 *ESTADO GENERAL DEL PORTAFOLIO*\n"
+        for o in todas_las_alertas_largo_plazo:
+            msj += f"• *{o['simbolo']}* | `${o['precio']:,.4f}`\n  {o['etiqueta']}\n"
+            msj += f"  🛡️ *Trailing Stop:* `${o['trailing_stop']:,.4f}`\n"
+            if o.get('prob_subida') is not None:
+                msj += f"  🤖 *Probabilidad IA:* 📈 `{o['prob_subida']:.1f}%` | 📉 `{o['prob_bajada']:.1f}%`\n"
+        msj += "\n"
 
-        if n_env:
-            msj += "🛡️ *NÚCLEO CONSERVADOR*\n" + formatear_bloque_telegram(n_env) + "\n"
-        if c_env:
-            msj += "🚀 *CRECIMIENTO (IA & TECH)*\n" + formatear_bloque_telegram(c_env) + "\n"
-        if seg_env:
-            msj += "📊 *SEGUIMIENTO (L1 & RWA)*\n" + formatear_bloque_telegram(seg_env) + "\n"
-        if ar_env:
-            msj += "🔥 *ALTO RIESGO (MEMES & POW)*\n" + formatear_bloque_telegram(ar_env) + "\n"
-        if s_env:
-            msj += f"🎯 *RADAR DE PRECISIÓN ({TEMPORALIDAD_SATELITE})*\n"
-            for o in s_env:
-                emoji = '🟢' if 'ALCISTA' in o['tipo_alerta'] or 'REVERSION' in o['tipo_alerta'] or 'BREAKOUT' in o['tipo_alerta'] else '🔴'
-                msj += f"{emoji} *{o['tipo_alerta'].replace('_', ' ')}* | *{o['simbolo']}*\n  Entrada: `${o['precio']:,.4f}`\n  🎯 TP: `${o['tp']:,.4f}` | 🛑 SL: `${o['sl']:,.4f}`\n"
-                if o.get('prob_subida') is not None:
-                    msj += f"  🤖 *Probabilidad IA:* 📈 `{o['prob_subida']:.1f}%` | 📉 `{o['prob_bajada']:.1f}%`\n"
-                if o['validacion'] and o['validacion']['suficiente']:
-                    msj += f"  📊 Histórico (con comisiones): Win Rate {o['validacion']['win_rate']:.0f}%\n"
-                elif o['validacion'] and o['validacion']['n_casos'] > 0:
-                    msj += f"  ⚠️ Solo {o['validacion']['n_casos']} casos históricos — poco confiable\n"
-        msj += "\n_⚠️ Herramienta cuantitativa. No constituye asesoría financiera personalizada._"
-        enviar_alerta_telegram(msj)
+    if alertas_satelite:
+        msj += f"🎯 *RADAR DE PRECISIÓN ({TEMPORALIDAD_SATELITE})*\n"
+        for o in alertas_satelite:
+            emoji = '🟢' if 'ALCISTA' in o['tipo_alerta'] or 'REVERSION' in o['tipo_alerta'] or 'BREAKOUT' in o['tipo_alerta'] else '🔴'
+            msj += f"{emoji} *{o['tipo_alerta'].replace('_', ' ')}* | *{o['simbolo']}*\n  Entrada: `${o['precio']:,.4f}`\n  🎯 TP: `${o['tp']:,.4f}` | 🛑 SL: `${o['sl']:,.4f}`\n"
+            if o.get('prob_subida') is not None:
+                msj += f"  🤖 *Probabilidad IA:* 📈 `{o['prob_subida']:.1f}%` | 📉 `{o['prob_bajada']:.1f}%`\n"
+            if o['validacion'] and o['validacion']['suficiente']:
+                msj += f"  📊 Histórico (con comisiones): Win Rate {o['validacion']['win_rate']:.0f}%\n"
+            elif o['validacion'] and o['validacion']['n_casos'] > 0:
+                msj += f"  ⚠️ Solo {o['validacion']['n_casos']} casos históricos — poco confiable\n"
+        msj += "\n"
+    else:
+        msj += f"🎯 *RADAR DE PRECISIÓN ({TEMPORALIDAD_SATELITE})*\n  ⚪ Sin señales activas en este ciclo.\n\n"
 
+    msj += "_⚠️ Herramienta cuantitativa. No constituye asesoría financiera personalizada._"
+
+    # Se dispara siempre en cada ejecución de 4h
+    enviar_alerta_telegram(msj)
     guardar_estado(estado_nuevo)
 
 
