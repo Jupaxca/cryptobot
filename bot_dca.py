@@ -14,20 +14,25 @@ from xgboost import XGBClassifier
 warnings.filterwarnings('ignore')
 
 # ==========================================================================
-# 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO (ACTUALIZADO 2026)
+# 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO (NARRATIVAS 2026)
 # ==========================================================================
+# Titanes del mercado y Oráculos
 NUCLEO_CONSERVADOR = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'LINK/USDT']
 TEMPORALIDAD_NUCLEO = '1d'
 
-NIVEL_CRECIMIENTO = ['NEAR/USDT', 'TAO/USDT', 'AVAX/USDT', 'RENDER/USDT', 'FET/USDT']
+# L1s Modernas, Capas 2 (Modulares) y Líderes en IA (DeAI)
+NIVEL_CRECIMIENTO = ['NEAR/USDT', 'TAO/USDT', 'AVAX/USDT', 'RENDER/USDT', 'FET/USDT', 'TIA/USDT', 'ARB/USDT']
 TEMPORALIDAD_CRECIMIENTO = '1d'
 
-SEGUIMIENTO_ESTRATEGICO = ['XRP/USDT', 'SUI/USDT', 'APT/USDT', 'SEI/USDT', 'ADA/USDT', 'PENDLE/USDT']
+# Activos del Mundo Real (RWA), Infraestructura (DePIN) y Ecosistemas Emergentes
+SEGUIMIENTO_ESTRATEGICO = ['XRP/USDT', 'SUI/USDT', 'APT/USDT', 'ONDO/USDT', 'OM/USDT', 'HNT/USDT', 'FIL/USDT', 'PENDLE/USDT']
 TEMPORALIDAD_SEGUIMIENTO = '1d'
 
-ALTO_RIESGO = ['THETA/USDT', 'ASTR/USDT', 'COTI/USDT', 'PEPE/USDT', 'WIF/USDT', 'KAS/USDT']
+# Memecoins de Alta Capitalización y Altcoins de Extrema Volatilidad (Momentum)
+ALTO_RIESGO = ['PEPE/USDT', 'WIF/USDT', 'POPCAT/USDT', 'KAS/USDT', 'THETA/USDT', 'ASTR/USDT']
 TEMPORALIDAD_ALTO_RIESGO = '1d'
 
+# Configuración del Radar de Precisión y Riesgo
 TEMPORALIDAD_SATELITE = '4h'
 SATELITE_RSI_ENTRADA = 25
 SATELITE_ADX_MAX = 20
