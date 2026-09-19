@@ -5,6 +5,7 @@ import os
 import json
 import requests
 import warnings
+import time
 from datetime import datetime, timezone
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
@@ -39,8 +40,9 @@ SATELITE_ADX_MAX = 20
 SATELITE_ATR_SL_MULT = 2.0
 SATELITE_ATR_TP_MULT = 4.0
 
-VELAS_ANALISIS = 300
-VELAS_ESCUDO_BTC = 80
+# CORRECCIÓN ESTADÍSTICA: Mayor profundidad histórica para IA y K-Means
+VELAS_ANALISIS = 1500  
+VELAS_ESCUDO_BTC = 400 
 TEMPORALIDAD_ESCUDO = '1d'
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -71,7 +73,6 @@ def calcular_rsi(series, period=14):
     return (100 - (100 / (1 + rs))).replace([np.inf, -np.inf], 100)
 
 def calcular_vwma(df, period=30):
-    """NUEVO: Precio Promedio Ponderado por Volumen (Huella Institucional)"""
     return (df['cierre'] * df['volumen']).rolling(period).sum() / df['volumen'].rolling(period).sum()
 
 def calcular_bollinger_bands(series, period=20, std_dev=2):
@@ -204,6 +205,7 @@ def auditar_memoria(exchange, horizonte_dias=HORIZONTE_VALIDACION):
                     df_memoria.at[idx, 'precio_futuro'] = precio_actual
                     df_memoria.at[idx, 'exito_real'] = 1 if precio_actual > fila['precio_entrada'] else 0
                     cambios = True
+                time.sleep(0.2) # Pausa API
             except Exception: pass
     if cambios:
         df_memoria.to_csv(ARCHIVO_MEMORIA, index=False)
@@ -299,7 +301,7 @@ def formatear_bloque_telegram(alertas):
     return txt
 
 # ==========================================================================
-# 5. ANÁLISIS DE ACTIVOS LARGO PLAZO (AHORA CON VWMA Y CAMBIO DE ESTRATEGIA)
+# 5. ANÁLISIS DE ACTIVOS LARGO PLAZO 
 # ==========================================================================
 def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, rsi_compra, rsi_venta, sobreprecio_pct, riesgo_aplicado, tipo_estrategia="REVERSION"):
     velas = descargar_velas_cerradas(exchange, simbolo, temporalidad, VELAS_ANALISIS)
@@ -308,7 +310,7 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
     df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
     
     df['RSI'] = calcular_rsi(df['cierre'], 14)
-    df['VWMA_30'] = calcular_vwma(df, 30) # REEMPLAZO INSTITUCIONAL DE LA MEDIA MÓVIL
+    df['VWMA_30'] = calcular_vwma(df, 30)
     df['ATR'] = calcular_atr(df, 14)
     df['ADX'] = calcular_adx(df, 14)
     
@@ -325,10 +327,9 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
     ultima = df.iloc[-1]
     precio, rsi, vwma_30, atr = ultima['cierre'], ultima['RSI'], ultima['VWMA_30'], ultima['ATR']
     
-    trailing_stop = precio - (atr * 2.5) # Chandelier Exit Básico
+    trailing_stop = precio - (atr * 2.5) 
     prefijo = "⚠️ *(Alta Volatilidad):* " if tipo_estrategia == "MOMENTUM" else ""
 
-    # LÓGICA DE INVERSIÓN BIFURCADA
     if tipo_estrategia == "REVERSION":
         condicion_descuento = (df['cierre'] <= df['VWMA_30'] * (1 - descuento_pct)) | (df['RSI'] < rsi_compra)
         condicion_sobrecompra = df['RSI'] >= rsi_venta
@@ -342,7 +343,6 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
             accion, etiqueta, validacion = "NEUTRO", f"{prefijo}⚪ *ZONA NEUTRA:* Mercado estable.", None
             
     elif tipo_estrategia == "MOMENTUM":
-        # NUEVO PARADIGMA: No atrapar cuchillos en alto riesgo, operar la tendencia fuerte.
         condicion_momentum = (df['cierre'] > df['VWMA_30']) & (df['RSI'] > 55) & (df['RSI'] < 75)
         condicion_caida = (df['RSI'] >= 80) | (df['cierre'] < df['VWMA_30'] * 0.95)
         if precio > vwma_30 and 55 < rsi < 75:
@@ -376,48 +376,57 @@ def ejecutar_bot_maestro():
     estado_anterior, estado_nuevo = cargar_estado(), {}
     alertas_nucleo, alertas_crecimiento, alertas_seguimiento, alertas_alto_riesgo, alertas_satelite = [], [], [], [], []
 
-    # NUEVO: Detector de Altseason (Capital Flow)
     velas_btc = descargar_velas_cerradas(exchange, 'BTC/USDT', TEMPORALIDAD_ESCUDO, VELAS_ESCUDO_BTC)
-    velas_eth = descargar_velas_cerradas(exchange, 'ETH/USDT', TEMPORALIDAD_ESCUDO, 30)
+    # CORRECCIÓN: Solicitamos más velas (60) para proteger el cálculo de Altseason
+    velas_eth = descargar_velas_cerradas(exchange, 'ETH/USDT', TEMPORALIDAD_ESCUDO, 60) 
+    
     regimen_macro = "DESCONOCIDO"
     altseason_estado = "DESCONOCIDO"
     
     if velas_btc:
         df_btc = pd.DataFrame(velas_btc, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
         regimen_macro = detectar_regimen_kmeans(df_btc)
+        
         if velas_eth:
             df_eth = pd.DataFrame(velas_eth, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
-            rend_btc = (df_btc['cierre'].iloc[-1] / df_btc['cierre'].iloc[-30]) - 1
-            rend_eth = (df_eth['cierre'].iloc[-1] / df_eth['cierre'].iloc[0]) - 1
-            altseason_estado = "🟢 ON (Rotación a Alts)" if rend_eth > rend_btc else "🔴 OFF (Dominancia BTC)"
+            # CORRECCIÓN: Cálculo seguro para evitar caídas si la API devuelve menos datos
+            if len(df_btc) > 30 and len(df_eth) > 30:
+                rend_btc = (df_btc['cierre'].iloc[-1] / df_btc['cierre'].iloc[-30]) - 1
+                rend_eth = (df_eth['cierre'].iloc[-1] / df_eth['cierre'].iloc[-30]) - 1
+                altseason_estado = "🟢 ON (Rotación a Alts)" if rend_eth > rend_btc else "🔴 OFF (Dominancia BTC)"
+            else:
+                altseason_estado = "DESCONOCIDO (Datos insuficientes)"
 
     for s in NUCLEO_CONSERVADOR:
         if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_NUCLEO, 0.04, 40, 75, 0.05, riesgo_dinamico, "REVERSION"):
             alertas_nucleo.append(r)
             estado_nuevo[s] = r['accion']
+        time.sleep(0.5) # CORRECCIÓN: Pausa API
 
     for s in NIVEL_CRECIMIENTO:
         if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_CRECIMIENTO, 0.07, 35, 80, 0.08, riesgo_dinamico, "REVERSION"):
             alertas_crecimiento.append(r)
             estado_nuevo[s] = r['accion']
+        time.sleep(0.5)
 
     for s in SEGUIMIENTO_ESTRATEGICO:
         if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_SEGUIMIENTO, 0.06, 35, 78, 0.07, riesgo_dinamico, "REVERSION"):
             alertas_seguimiento.append(r)
             estado_nuevo[s] = r['accion']
+        time.sleep(0.5)
 
-    for s in ALTO_RIESGO: # Aplica la nueva estrategia de Momentum
+    for s in ALTO_RIESGO:
         if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_ALTO_RIESGO, 0.08, 30, 80, 0.10, riesgo_dinamico, "MOMENTUM"):
             alertas_alto_riesgo.append(r)
             estado_nuevo[s] = r['accion']
+        time.sleep(0.5)
 
-    # BLOQUE SATÉLITE CON MATRIZ DE CORRELACIÓN
     try:
         tickers = exchange.fetch_tickers()
         excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_CRECIMIENTO) | set(SEGUIMIENTO_ESTRATEGICO) | set(ALTO_RIESGO)
         candidatas = sorted([s for s, t in tickers.items() if '/USDT' in s and s not in excluidos and es_mercado_spot_valido(exchange, s) and t.get('quoteVolume', 0) > 1500000], key=lambda s: tickers[s].get('quoteVolume', 0), reverse=True)[:15]
 
-        historico_candidatas_aceptadas = {} # Guarda precios para correlación
+        historico_candidatas_aceptadas = {} 
 
         for s in candidatas:
             velas = descargar_velas_cerradas(exchange, s, TEMPORALIDAD_SATELITE, VELAS_ANALISIS)
@@ -453,7 +462,6 @@ def ejecutar_bot_maestro():
                 breakout_ok = (ultima['cierre'] > ultima['Max_20']) and (ultima['cierre'] > ultima['VWMA_20']) and (ultima['ADX'] > 25) and ultima['CRT_Valida'] == 1
 
             if cuantitativo_ok or breakout_ok or patron_smc:
-                # NUEVO: Escudo de Correlación
                 correlacion_peligrosa = False
                 cierre_actual = df['cierre'].tail(50).values
                 for s_aceptado, cierre_aceptado in historico_candidatas_aceptadas.items():
@@ -463,9 +471,9 @@ def ejecutar_bot_maestro():
                             correlacion_peligrosa = True
                             break
                 if correlacion_peligrosa:
-                    continue # Descarta la moneda si es matemáticamente idéntica a otra ya detectada
+                    continue 
 
-                historico_candidatas_aceptadas[s] = cierre_actual # Guarda para comparar futuras
+                historico_candidatas_aceptadas[s] = cierre_actual 
                 prob_subida, prob_bajada = inferir_probabilidad_xgboost(df)
                 
                 if cuantitativo_ok:
@@ -484,6 +492,8 @@ def ejecutar_bot_maestro():
                 if prob_subida is not None: registrar_prediccion(s, ultima['cierre'], ultima['RSI'], ultima['ATR'], ultima['ADX'], ultima['volumen'], ultima['Hurst'], ultima['Pendiente_Reg'], ultima['R2_Tendencia'], ultima['CRT_Valida'], prob_subida)
                 alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': tipo_al, 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * riesgo_dinamico / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada})
                 estado_nuevo[s] = tipo_al
+            
+            time.sleep(0.5) # CORRECCIÓN: Pausa API para el bloque satélite
 
     except Exception as e:
         print(f"⚠️ Error procesando el bloque satélite: {e}")
