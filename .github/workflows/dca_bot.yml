@@ -2,7 +2,7 @@ name: Super Bot Cripto 24/7 (Core-Satellite)
 
 on:
   schedule:
-    - cron: '0 0,4,8,12,16,20 * * *' # Ejecuta exactamente al cierre de cada vela de 4h UTC
+    - cron: '5 0,4,8,12,16,20 * * *' # Ejecuta 5 minutos después del cierre (ej: 00:05, 04:05 UTC) para evitar retrasos de GitHub y asegurar la vela
   workflow_dispatch: # Permite ejecutarlo manualmente desde la web cuando quieras
 
 permissions:
