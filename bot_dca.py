@@ -212,7 +212,7 @@ def es_mercado_spot_valido(exchange, simbolo):
 
 
 # ==========================================================================
-# 3. MÓDULOS DE MEMORIA E IA AISLADA
+# 3. MÓDULOS DE MEMORIA E IA AISLADA (CON FILTRO ANTI-REPETICIONES)
 # ==========================================================================
 def registrar_prediccion(simbolo, precio, rsi, atr, adx, vol, hurst, slope, r2, crt, prob_subida):
     nueva_fila = pd.DataFrame([{
@@ -221,9 +221,28 @@ def registrar_prediccion(simbolo, precio, rsi, atr, adx, vol, hurst, slope, r2, 
         'Hurst': hurst, 'Pendiente_Reg': slope, 'R2_Tendencia': r2, 'CRT_Valida': crt,
         'prob_subida_predicha': prob_subida, 'precio_futuro': np.nan, 'exito_real': np.nan
     }])
-    if not os.path.exists(ARCHIVO_MEMORIA):
+    
+    if not os.path.exists(ARCHIVO_MEMORIA) or os.path.getsize(ARCHIVO_MEMORIA) == 0:
         nueva_fila.to_csv(ARCHIVO_MEMORIA, index=False)
-    else:
+        return
+
+    try:
+        df_mem = pd.read_csv(ARCHIVO_MEMORIA)
+        if df_mem.empty:
+            nueva_fila.to_csv(ARCHIVO_MEMORIA, index=False)
+            return
+
+        df_mem['timestamp_dt'] = pd.to_datetime(df_mem['timestamp'])
+        ahora_utc = datetime.now(timezone.utc)
+        
+        simbolo_reciente = df_mem[
+            (df_mem['simbolo'] == simbolo) & 
+            ((ahora_utc - df_mem['timestamp_dt']).dt.total_seconds() < 12 * 3600)
+        ]
+
+        if simbolo_reciente.empty:
+            nueva_fila.to_csv(ARCHIVO_MEMORIA, mode='a', header=False, index=False)
+    except Exception:
         nueva_fila.to_csv(ARCHIVO_MEMORIA, mode='a', header=False, index=False)
 
 
@@ -355,7 +374,6 @@ def enviar_alerta_telegram(mensaje):
         print("❌ ERROR: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID no están definidos en el entorno.")
         return
     
-    # Limpiamos asteriscos o acentos graves para prevenir cualquier error de formato en Telegram
     mensaje_plano = mensaje.replace('*', '').replace('`', '')
     
     max_length = 4000
@@ -364,7 +382,6 @@ def enviar_alerta_telegram(mensaje):
     for idx, msg_chunk in enumerate(mensajes):
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            # Omitimos parse_mode para enviar texto plano seguro
             payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg_chunk}
             response = requests.post(url, json=payload, timeout=15)
             
@@ -389,16 +406,6 @@ def cargar_estado():
 def guardar_estado(estado):
     with open(ESTADO_PATH, 'w') as f:
         json.dump(estado, f, indent=2)
-
-
-def formatear_bloque_telegram(alertas):
-    txt = ""
-    for o in alertas:
-        txt += f"• {o['simbolo']} | ${o['precio']:,.4f}\n  {o['etiqueta']}\n"
-        txt += f"  Trailing Stop: ${o['trailing_stop']:,.4f}\n"
-        if o.get('prob_subida') is not None:
-            txt += f"  Probabilidad IA: 📈 {o['prob_subida']:.1f}% | 📉 {o['prob_bajada']:.1f}%\n"
-    return txt
 
 
 # ==========================================================================
@@ -431,7 +438,7 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
     ultima = df.iloc[-1]
     precio, rsi, vwma_30, atr = ultima['cierre'], ultima['RSI'], ultima['VWMA_30'], ultima['ATR']
     trailing_stop = precio - (atr * 2.5)
-    prefijo = "*(Alta Volatilidad):* " if tipo_estrategia == "MOMENTUM" else ""
+    prefijo = "(Alta Volatilidad): " if tipo_estrategia == "MOMENTUM" else ""
 
     if tipo_estrategia == "REVERSION":
         condicion_descuento = (df['cierre'] <= df['VWMA_30'] * (1 - descuento_pct)) | (df['RSI'] < rsi_compra)
@@ -637,7 +644,7 @@ def ejecutar_bot_maestro():
     else:
         msj += f"🎯 RADAR DE PRECISIÓN ({TEMPORALIDAD_SATELITE})\n  ⚪ Sin señales activas en este ciclo.\n\n"
 
-    msj += "_⚠️ Herramienta cuantitativa. No constituye asesoría financiera personalizada._"
+    msj += "⚠️ Herramienta cuantitativa. No constituye asesoría financiera personalizada."
 
     enviar_alerta_telegram(msj)
     guardar_estado(estado_nuevo)
