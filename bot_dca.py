@@ -54,7 +54,7 @@ SLIPPAGE = 0.0005
 MIN_CASOS_RIESGO_DINAMICO = 20
 
 # ==========================================================================
-# 2. PROCESAMIENTO TÉCNICO Y MATEMÁTICAS (NUEVO: ZONAS CLUSTERING)
+# 2. PROCESAMIENTO TÉCNICO Y MATEMÁTICAS
 # ==========================================================================
 def descargar_velas_cerradas(exchange, simbolo, temporalidad, limit):
     try:
@@ -187,16 +187,35 @@ def detectar_patrones_smc_historico(df, ventana_estructura=15):
     return ultima_senal, senales_alcistas, senales_bajistas
 
 
-# ---> MEJORA 2 IMPLEMENTADA: Clustering de Zonas de Rechazo <---
 def detectar_zonas_rechazo_kmeans(df, n_clusters=5):
-    """Agrupa todos los máximos y mínimos históricos usando K-Means para encontrar zonas institucionales fuertes"""
-    precios = np.concatenate([df['maximo'].values, df['minimo'].values])
-    precios = precios.reshape(-1, 1)
-    # n_init=10 mejora la estabilidad de los clusters
+    precios = np.concatenate([df['maximo'].values, df['minimo'].values]).reshape(-1, 1)
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     kmeans.fit(precios)
-    zonas = sorted(kmeans.cluster_centers_.flatten())
-    return zonas
+    return sorted(kmeans.cluster_centers_.flatten())
+
+
+def proyectar_meta_temporal(df, temporalidad, horizonte_velas=HORIZONTE_VALIDACION):
+    """Calcula la meta proyectada de precio y el tiempo estimado en días u horas"""
+    ultima = df.iloc[-1]
+    precio_actual = ultima['cierre']
+    atr = ultima['ATR']
+    slope = ultima['Pendiente_Reg']
+    
+    # Proyección combinada por ATR y pendiente de regresión
+    desplazamiento_esperado = (slope * horizonte_velas) + (atr * 1.5)
+    precio_proyectado = max(precio_actual + desplazamiento_esperado, precio_actual * 1.01)
+    variacion_pct = ((precio_proyectado / precio_actual) - 1) * 100
+
+    if temporalidad == '1d':
+        tiempo_texto = f"{horizonte_velas} días"
+    elif temporalidad == '4h':
+        horas = horizonte_velas * 4
+        dias = horas / 24
+        tiempo_texto = f"{horas}h (~{dias:.1f} días)"
+    else:
+        tiempo_texto = f"{horizonte_velas} velas"
+
+    return tiempo_texto, precio_proyectado, variacion_pct
 
 
 def validar_senal_historica(df, condicion_activa, horizonte=HORIZONTE_VALIDACION):
@@ -473,12 +492,15 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
     denominador_atr = max(atr * 2.5, 0.0001)
     sugerencia_tamano = CAPITAL_REFERENCIA_USD * riesgo_aplicado / denominador_atr
     prob_subida, prob_bajada = inferir_probabilidad_xgboost(df, simbolo)
+    
+    tiempo_est, precio_meta, var_pct = proyectar_meta_temporal(df, temporalidad)
 
     return {
         'simbolo': simbolo, 'precio': precio, 'rsi': rsi, 'vwma_30': vwma_30,
         'accion': accion, 'etiqueta': etiqueta, 'validacion': validacion,
         'sugerencia_tamano': sugerencia_tamano, 'atr': atr, 'trailing_stop': trailing_stop,
-        'prob_subida': prob_subida, 'prob_bajada': prob_bajada
+        'prob_subida': prob_subida, 'prob_bajada': prob_bajada,
+        'tiempo_est': tiempo_est, 'precio_meta': precio_meta, 'var_pct': var_pct
     }
 
 
@@ -580,12 +602,10 @@ def ejecutar_bot_maestro():
                 breakout_ok = (ultima['cierre'] > ultima['Max_20']) and (ultima['cierre'] > ultima['VWMA_20']) and (ultima['ADX'] > 25) and ultima['CRT_Valida'] == 1
 
             if cuantitativo_ok or breakout_ok or patron_smc:
-                # ---> NUEVO 1: FILTRO DE ZONAS INSTITUCIONALES (CLUSTERING) <---
                 zonas_institucionales = detectar_zonas_rechazo_kmeans(df, n_clusters=5)
                 distancia_a_zona = min([abs(ultima['cierre'] - z) / ultima['cierre'] for z in zonas_institucionales])
-                en_zona_fuerte = distancia_a_zona <= 0.025  # Debe estar a máximo 2.5% de un cluster fuerte
+                en_zona_fuerte = distancia_a_zona <= 0.025
 
-                # ---> NUEVO 2: FILTRO CONFLUENCIA MULTITEMPORAL (1H) <---
                 velas_1h = descargar_velas_cerradas(exchange, s, '1h', 60)
                 confluencia_1h_ok = False
                 if velas_1h:
@@ -596,18 +616,14 @@ def ejecutar_bot_maestro():
 
                     es_alcista = cuantitativo_ok or breakout_ok or (patron_smc and patron_smc['tipo'] == "SMC_ALCISTA")
                     if es_alcista:
-                        # Para entrar en compra, 1H debe mostrar fuerza pero NO euforia (RSI < 75 y Cierre > VWMA)
                         if rsi_1h < 75 and cierre_1h >= (vwma_1h * 0.99):
                             confluencia_1h_ok = True
                     else:
-                        # Para venta/rechazo
                         if rsi_1h > 25 and cierre_1h <= (vwma_1h * 1.01):
                             confluencia_1h_ok = True
                 
-                # Si no está en una zona fuerte o la temporalidad de 1H contradice a la de 4H, la abortamos (fakeout)
                 if not en_zona_fuerte or not confluencia_1h_ok:
                     continue
-
 
                 correlacion_peligrosa = False
                 retornos_actuales = df['cierre'].tail(50).pct_change().dropna().values
@@ -622,6 +638,7 @@ def ejecutar_bot_maestro():
 
                 historico_candidatas_aceptadas[s] = retornos_actuales
                 prob_subida, prob_bajada = inferir_probabilidad_xgboost(df, s)
+                tiempo_est, precio_meta, var_pct = proyectar_meta_temporal(df, TEMPORALIDAD_SATELITE)
 
                 if cuantitativo_ok:
                     tipo_al = 'CUANTITATIVO_REVERSION'
@@ -639,7 +656,12 @@ def ejecutar_bot_maestro():
 
                 if prob_subida is not None:
                     registrar_prediccion(s, ultima['cierre'], ultima['RSI'], ultima['ATR'], ultima['ADX'], ultima['volumen'], ultima['Hurst'], ultima['Pendiente_Reg'], ultima['R2_Tendencia'], ultima['CRT_Valida'], prob_subida)
-                alertas_satelite.append({'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': tipo_al, 'tp': tp, 'sl': sl, 'sugerencia_tamano': CAPITAL_REFERENCIA_USD * riesgo_dinamico / max(abs(ultima['cierre'] - sl), 0.0001), 'validacion': val, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada})
+                alertas_satelite.append({
+                    'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': tipo_al, 'tp': tp, 'sl': sl, 
+                    'sugerencia_tamano': CAPITAL_REFERENCIA_USD * riesgo_dinamico / max(abs(ultima['cierre'] - sl), 0.0001), 
+                    'validacion': val, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada,
+                    'tiempo_est': tiempo_est, 'precio_meta': precio_meta, 'var_pct': var_pct
+                })
                 estado_nuevo[s] = tipo_al
 
             time.sleep(0.3)
@@ -662,6 +684,7 @@ def ejecutar_bot_maestro():
         for o in todas_las_alertas_largo_plazo:
             msj += f"• {o['simbolo']} | ${o['precio']:,.4f}\n  {o['etiqueta']}\n"
             msj += f"  🛡️ Trailing Stop: ${o['trailing_stop']:,.4f}\n"
+            msj += f"  ⏳ Horizonte Estimado: {o['tiempo_est']} | Meta: ${o['precio_meta']:,.4f} (+{o['var_pct']:.1f}%)\n"
             if o.get('prob_subida') is not None:
                 msj += f"  🤖 Probabilidad IA: 📈 {o['prob_subida']:.1f}% | 📉 {o['prob_bajada']:.1f}%\n"
         msj += "\n"
@@ -671,6 +694,7 @@ def ejecutar_bot_maestro():
         for o in alertas_satelite:
             emoji = '🟢' if 'ALCISTA' in o['tipo_alerta'] or 'REVERSION' in o['tipo_alerta'] or 'BREAKOUT' in o['tipo_alerta'] else '🔴'
             msj += f"{emoji} {o['tipo_alerta'].replace('_', ' ')} | {o['simbolo']}\n  Entrada: ${o['precio']:,.4f}\n  🎯 TP: ${o['tp']:,.4f} | 🛑 SL: ${o['sl']:,.4f}\n"
+            msj += f"  ⏳ Horizonte Estimado: {o['tiempo_est']} | Meta: ${o['precio_meta']:,.4f} (+{o['var_pct']:.1f}%)\n"
             msj += f"  🧩 Filtro Avanzado: 4H+1H Confluencia ✅ | Zona Institucional ✅\n"
             if o.get('prob_subida') is not None:
                 msj += f"  🤖 Probabilidad IA: 📈 {o['prob_subida']:.1f}% | 📉 {o['prob_bajada']:.1f}%\n"
