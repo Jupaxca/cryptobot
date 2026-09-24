@@ -54,7 +54,7 @@ SLIPPAGE = 0.0005
 MIN_CASOS_RIESGO_DINAMICO = 20
 
 # ==========================================================================
-# 2. PROCESAMIENTO TÉCNICO Y MATEMÁTICAS
+# 2. PROCESAMIENTO TÉCNICO Y MATEMÁTICAS (NUEVO: ZONAS CLUSTERING)
 # ==========================================================================
 def descargar_velas_cerradas(exchange, simbolo, temporalidad, limit):
     try:
@@ -187,6 +187,18 @@ def detectar_patrones_smc_historico(df, ventana_estructura=15):
     return ultima_senal, senales_alcistas, senales_bajistas
 
 
+# ---> MEJORA 2 IMPLEMENTADA: Clustering de Zonas de Rechazo <---
+def detectar_zonas_rechazo_kmeans(df, n_clusters=5):
+    """Agrupa todos los máximos y mínimos históricos usando K-Means para encontrar zonas institucionales fuertes"""
+    precios = np.concatenate([df['maximo'].values, df['minimo'].values])
+    precios = precios.reshape(-1, 1)
+    # n_init=10 mejora la estabilidad de los clusters
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    kmeans.fit(precios)
+    zonas = sorted(kmeans.cluster_centers_.flatten())
+    return zonas
+
+
 def validar_senal_historica(df, condicion_activa, horizonte=HORIZONTE_VALIDACION):
     disparos = np.where(condicion_activa)[0]
     disparos = disparos[disparos < len(df) - horizonte]
@@ -212,7 +224,7 @@ def es_mercado_spot_valido(exchange, simbolo):
 
 
 # ==========================================================================
-# 3. MÓDULOS DE MEMORIA E IA AISLADA (CON FILTRO ANTI-REPETICIONES)
+# 3. MÓDULOS DE MEMORIA E IA AISLADA
 # ==========================================================================
 def registrar_prediccion(simbolo, precio, rsi, atr, adx, vol, hurst, slope, r2, crt, prob_subida):
     nueva_fila = pd.DataFrame([{
@@ -367,7 +379,7 @@ def inferir_probabilidad_xgboost(df, simbolo_actual):
 
 
 # ==========================================================================
-# 4. TELEGRAM (TEXTO PLANO Y FRAGMENTADO PARA EVITAR ERRORES DE SINTAXIS)
+# 4. TELEGRAM (TEXTO PLANO Y FRAGMENTADO)
 # ==========================================================================
 def enviar_alerta_telegram(mensaje):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -384,10 +396,6 @@ def enviar_alerta_telegram(mensaje):
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
             payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg_chunk}
             response = requests.post(url, json=payload, timeout=15)
-            
-            print(f"📡 Código de respuesta de Telegram (Parte {idx+1}): {response.status_code}")
-            if response.status_code != 200:
-                print(f"📦 Error de Telegram: {response.text}")
             time.sleep(0.5)
         except Exception as e:
             print(f"❌ EXCEPCIÓN al conectar con Telegram (Parte {idx+1}): {e}")
@@ -572,6 +580,35 @@ def ejecutar_bot_maestro():
                 breakout_ok = (ultima['cierre'] > ultima['Max_20']) and (ultima['cierre'] > ultima['VWMA_20']) and (ultima['ADX'] > 25) and ultima['CRT_Valida'] == 1
 
             if cuantitativo_ok or breakout_ok or patron_smc:
+                # ---> NUEVO 1: FILTRO DE ZONAS INSTITUCIONALES (CLUSTERING) <---
+                zonas_institucionales = detectar_zonas_rechazo_kmeans(df, n_clusters=5)
+                distancia_a_zona = min([abs(ultima['cierre'] - z) / ultima['cierre'] for z in zonas_institucionales])
+                en_zona_fuerte = distancia_a_zona <= 0.025  # Debe estar a máximo 2.5% de un cluster fuerte
+
+                # ---> NUEVO 2: FILTRO CONFLUENCIA MULTITEMPORAL (1H) <---
+                velas_1h = descargar_velas_cerradas(exchange, s, '1h', 60)
+                confluencia_1h_ok = False
+                if velas_1h:
+                    df_1h = pd.DataFrame(velas_1h, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+                    rsi_1h = calcular_rsi(df_1h['cierre'], 14).iloc[-1]
+                    vwma_1h = calcular_vwma(df_1h, 20).iloc[-1]
+                    cierre_1h = df_1h['cierre'].iloc[-1]
+
+                    es_alcista = cuantitativo_ok or breakout_ok or (patron_smc and patron_smc['tipo'] == "SMC_ALCISTA")
+                    if es_alcista:
+                        # Para entrar en compra, 1H debe mostrar fuerza pero NO euforia (RSI < 75 y Cierre > VWMA)
+                        if rsi_1h < 75 and cierre_1h >= (vwma_1h * 0.99):
+                            confluencia_1h_ok = True
+                    else:
+                        # Para venta/rechazo
+                        if rsi_1h > 25 and cierre_1h <= (vwma_1h * 1.01):
+                            confluencia_1h_ok = True
+                
+                # Si no está en una zona fuerte o la temporalidad de 1H contradice a la de 4H, la abortamos (fakeout)
+                if not en_zona_fuerte or not confluencia_1h_ok:
+                    continue
+
+
                 correlacion_peligrosa = False
                 retornos_actuales = df['cierre'].tail(50).pct_change().dropna().values
                 for s_aceptado, retornos_aceptados in historico_candidatas_aceptadas.items():
@@ -634,6 +671,7 @@ def ejecutar_bot_maestro():
         for o in alertas_satelite:
             emoji = '🟢' if 'ALCISTA' in o['tipo_alerta'] or 'REVERSION' in o['tipo_alerta'] or 'BREAKOUT' in o['tipo_alerta'] else '🔴'
             msj += f"{emoji} {o['tipo_alerta'].replace('_', ' ')} | {o['simbolo']}\n  Entrada: ${o['precio']:,.4f}\n  🎯 TP: ${o['tp']:,.4f} | 🛑 SL: ${o['sl']:,.4f}\n"
+            msj += f"  🧩 Filtro Avanzado: 4H+1H Confluencia ✅ | Zona Institucional ✅\n"
             if o.get('prob_subida') is not None:
                 msj += f"  🤖 Probabilidad IA: 📈 {o['prob_subida']:.1f}% | 📉 {o['prob_bajada']:.1f}%\n"
             if o['validacion'] and o['validacion']['suficiente']:
