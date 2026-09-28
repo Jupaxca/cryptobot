@@ -556,13 +556,25 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
     
     dia_pico, rec_hold = estimar_pico_confluencia(df, HORIZONTE_VALIDACION)
 
+    # --- INYECCIÓN: TRADUCTOR VISUAL DE BALLENAS ---
+    volumen_promedio = df['volumen'].tail(5).mean()
+    delta_reciente = df['Delta_Volumen'].tail(3).sum()
+
+    if delta_reciente > (volumen_promedio * 0.15):
+        estado_ballenas = "🟢 Acumulación Fuerte"
+    elif delta_reciente < -(volumen_promedio * 0.15):
+        estado_ballenas = "🔴 Distribución (Ventas Institucionales)"
+    else:
+        estado_ballenas = "⚪ Actividad Neutral"
+
     return {
         'simbolo': simbolo, 'precio': precio, 'rsi': rsi, 'vwma_30': vwma_30,
         'accion': accion, 'etiqueta': etiqueta, 'validacion': validacion,
         'sugerencia_tamano': sugerencia_tamano, 'atr': atr, 'trailing_stop': trailing_stop,
         'prob_subida': prob_subida, 'prob_bajada': prob_bajada,
         'tiempo_est': tiempo_est, 'precio_meta': precio_meta, 'var_pct': var_pct,
-        'dia_pico': dia_pico, 'rec_hold': rec_hold
+        'dia_pico': dia_pico, 'rec_hold': rec_hold,
+        'ballenas': estado_ballenas
     }
 
 
@@ -699,6 +711,16 @@ def ejecutar_bot_maestro():
                 tiempo_est, precio_meta, var_pct = proyectar_meta_temporal(df, TEMPORALIDAD_SATELITE)
                 dia_pico, rec_hold = estimar_pico_confluencia(df, HORIZONTE_VALIDACION)
 
+                # --- INYECCIÓN VISUAL DE BALLENAS EN SATÉLITES ---
+                volumen_promedio_sat = df['volumen'].tail(5).mean()
+                delta_reciente_sat = df['Delta_Volumen'].tail(3).sum()
+                if delta_reciente_sat > (volumen_promedio_sat * 0.15):
+                    estado_ballenas_sat = "🟢 Acumulación Fuerte"
+                elif delta_reciente_sat < -(volumen_promedio_sat * 0.15):
+                    estado_ballenas_sat = "🔴 Distribución (Ventas Institucionales)"
+                else:
+                    estado_ballenas_sat = "⚪ Actividad Neutral"
+
                 if cuantitativo_ok:
                     tipo_al = 'CUANTITATIVO_REVERSION'
                     sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
@@ -728,7 +750,8 @@ def ejecutar_bot_maestro():
                     'sugerencia_tamano': sugerencia_tamano_optimizada, 
                     'validacion': val, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada,
                     'tiempo_est': tiempo_est, 'precio_meta': precio_meta, 'var_pct': var_pct,
-                    'dia_pico': dia_pico, 'rec_hold': rec_hold
+                    'dia_pico': dia_pico, 'rec_hold': rec_hold,
+                    'ballenas': estado_ballenas_sat
                 })
                 estado_nuevo[s] = tipo_al
 
@@ -753,6 +776,7 @@ def ejecutar_bot_maestro():
             msj += f"  🛡️ Trailing Stop: ${o['trailing_stop']:,.4f}\n"
             msj += f"  ⏳ Horizonte Estimado: {o['tiempo_est']} | Meta: ${o['precio_meta']:,.4f} (+{o['var_pct']:.1f}%)\n"
             msj += f"  📅 Pico Estimado: Vela {o['dia_pico']} | 🧩 {o['rec_hold']}\n"
+            msj += f"  🐋 Rastro Ballenas (CVD): {o['ballenas']}\n"
             if o.get('prob_subida') is not None:
                 msj += f"  🤖 Probabilidad IA: 📈 {o['prob_subida']:.1f}% | 📉 {o['prob_bajada']:.1f}%\n"
         msj += "\n"
@@ -764,6 +788,7 @@ def ejecutar_bot_maestro():
             msj += f"{emoji} {o['tipo_alerta'].replace('_', ' ')} | {o['simbolo']}\n  Entrada: ${o['precio']:,.4f}\n  🎯 TP: ${o['tp']:,.4f} | 🛑 SL: ${o['sl']:,.4f}\n"
             msj += f"  ⏳ Horizonte Estimado: {o['tiempo_est']} | Meta: ${o['precio_meta']:,.4f} (+{o['var_pct']:.1f}%)\n"
             msj += f"  📅 Pico Estimado: Vela {o['dia_pico']} | 🧩 {o['rec_hold']}\n"
+            msj += f"  🐋 Rastro Ballenas (CVD): {o['ballenas']}\n"
             msj += f"  🧩 Filtro Avanzado: 4H+1H Confluencia ✅ | Zona Institucional ✅\n"
             msj += f"  ⚖️ Gestión (Kelly): Tamaño sugerido ${o['sugerencia_tamano']:,.2f}\n"
             if o.get('prob_subida') is not None:
