@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
-from xgboost import XGBClassifier
+from xgboost import XGBClassifier, XGBRegressor
 
 warnings.filterwarnings('ignore')
 
@@ -63,6 +63,104 @@ def descargar_velas_cerradas(exchange, simbolo, temporalidad, limit):
     except Exception:
         return None
 
+def calcular_cvd(df):
+    """Inferencia Estadística de Presión de Ballenas (CVD)"""
+    rango = df['maximo'] - df['minimo']
+    rango = rango.replace(0, 0.0001)
+    
+    fuerza_compradora = ((df['cierre'] - df['minimo']) / rango) * df['volumen']
+    fuerza_vendedora = df['volumen'] - fuerza_compradora
+    
+    df['Delta_Volumen'] = fuerza_compradora - fuerza_vendedora
+    df['CVD'] = df['Delta_Volumen'].cumsum()
+    return df
+
+def calcular_kelly_fraccional(prob_exito_pct, tp_precio, sl_precio, precio_entrada, fraccion=0.5):
+    """Criterio de Kelly matemático para gestión de riesgo óptimo"""
+    if prob_exito_pct is None:
+        return RIESGO_POR_TRADE
+        
+    p = prob_exito_pct / 100.0
+    q = 1.0 - p
+    
+    distancia_tp = abs(tp_precio - precio_entrada)
+    distancia_sl = abs(precio_entrada - sl_precio)
+    if distancia_sl == 0: return 0.0
+    
+    b = distancia_tp / distancia_sl
+    kelly_pct = p - (q / b)
+    
+    if kelly_pct <= 0:
+        return 0.0
+        
+    riesgo_final = kelly_pct * fraccion
+    return max(min(riesgo_final, 0.05), 0.005)
+
+def estimar_pico_confluencia(df, horizonte_velas=HORIZONTE_VALIDACION):
+    """Combina estadística de Momentum y Machine Learning (Regressor) para calcular el día/vela óptimo de Hold"""
+    n = len(df)
+    if n < 100:
+        return 7, "Hold ~7 velas (Faltan datos históricos)"
+
+    # 1. CEREBRO ESTADÍSTICO
+    dias_al_pico_hist = []
+    for i in range(max(0, n - 120 - horizonte_velas), n - horizonte_velas):
+        ventana_futura = df['maximo'].iloc[i + 1 : i + 1 + horizonte_velas].values
+        if len(ventana_futura) == horizonte_velas:
+            dias_al_pico_hist.append(np.argmax(ventana_futura) + 1)
+
+    dia_base_estadistico = int(np.median(dias_al_pico_hist)) if dias_al_pico_hist else 7
+    ultima = df.iloc[-1]
+    
+    if ultima['RSI'] > 70:
+        dia_estadistico = max(1, dia_base_estadistico - 3)
+    elif ultima['ADX'] > 28 and ultima['Pendiente_Reg'] > 0:
+        dia_estadistico = min(horizonte_velas, dia_base_estadistico + 2)
+    else:
+        dia_estadistico = dia_base_estadistico
+
+    # 2. CEREBRO IA (XGBoost Regressor)
+    dia_ia = dia_estadistico
+    confianza_ia = False
+    
+    try:
+        df_ml = df.copy()
+        indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=horizonte_velas)
+        df_ml['dia_pico_futuro'] = df_ml['maximo'].rolling(window=indexer).apply(lambda x: np.argmax(x) + 1, raw=True)
+        
+        features = ['RSI', 'ATR', 'ADX', 'volumen', 'Hurst', 'Pendiente_Reg', 'CRT_Valida', 'CVD', 'Delta_Volumen']
+        df_ml = df_ml.dropna(subset=features + ['dia_pico_futuro'])
+        
+        X = df_ml[:-horizonte_velas][features]
+        y = df_ml[:-horizonte_velas]['dia_pico_futuro']
+        
+        if len(X) >= 40:
+            modelo_dias = XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.05, random_state=42)
+            modelo_dias.fit(X, y)
+            
+            X_actual = df_ml.iloc[-1:][features]
+            prediccion = modelo_dias.predict(X_actual)[0]
+            dia_ia = min(max(int(round(prediccion)), 1), horizonte_velas)
+            confianza_ia = True
+    except Exception:
+        pass
+
+    # 3. CONFLUENCIA (Sinergia de Modelos)
+    dia_final = int(round((dia_estadistico + dia_ia) / 2))
+    diferencia = abs(dia_estadistico - dia_ia)
+    
+    if confianza_ia:
+        if diferencia <= 2:
+            estatus = f"Alta Confianza (Modelos Sincronizados: Est. {dia_estadistico} | IA {dia_ia})"
+        elif diferencia >= 6:
+            estatus = f"Volatilidad (Discrepancia: Est. {dia_estadistico} vs IA {dia_ia})"
+        else:
+            estatus = f"Promedio calculado (Est. {dia_estadistico} | IA {dia_ia})"
+    else:
+        estatus = "Análisis Estadístico (IA sin datos suficientes)"
+
+    recomendacion_hold = f"Hold ~{dia_final} velas | {estatus}"
+    return dia_final, recomendacion_hold
 
 def calcular_rsi(series, period=14):
     delta = series.diff()
@@ -71,16 +169,13 @@ def calcular_rsi(series, period=14):
     rs = gain / loss
     return (100 - (100 / (1 + rs))).replace([np.inf, -np.inf], 100)
 
-
 def calcular_vwma(df, period=30):
     return (df['cierre'] * df['volumen']).rolling(period).sum() / df['volumen'].rolling(period).sum()
-
 
 def calcular_bollinger_bands(series, period=20, std_dev=2):
     middle = series.rolling(window=period).mean()
     std = series.rolling(window=period).std()
     return middle + (std * std_dev), middle, middle - (std * std_dev)
-
 
 def calcular_atr(df, period=14):
     tr = pd.concat([
@@ -89,7 +184,6 @@ def calcular_atr(df, period=14):
         (df['minimo'] - df['cierre'].shift(1)).abs()
     ], axis=1).max(axis=1)
     return tr.rolling(period).mean()
-
 
 def calcular_adx(df, period=14):
     up_move = df['maximo'] - df['maximo'].shift(1)
@@ -101,7 +195,6 @@ def calcular_adx(df, period=14):
     minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(period).mean() / atr)
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
     return dx.replace([np.inf, -np.inf], np.nan).rolling(period).mean()
-
 
 def calcular_hurst_vectorizado(series, window=100, max_lag=20):
     hursts = []
@@ -119,7 +212,6 @@ def calcular_hurst_vectorizado(series, window=100, max_lag=20):
         except Exception:
             hursts.append(0.5)
     return pd.Series(hursts, index=series.index)
-
 
 def calcular_regresion_rolling(series, window=20):
     slopes, r2s = [], []
@@ -140,7 +232,6 @@ def calcular_regresion_rolling(series, window=20):
             slopes.append(slope)
             r2s.append(corr ** 2 if not np.isnan(corr) else 0.0)
     return pd.Series(slopes, index=series.index), pd.Series(r2s, index=series.index)
-
 
 def detectar_patrones_smc_historico(df, ventana_estructura=15):
     n = len(df)
@@ -186,22 +277,18 @@ def detectar_patrones_smc_historico(df, ventana_estructura=15):
 
     return ultima_senal, senales_alcistas, senales_bajistas
 
-
 def detectar_zonas_rechazo_kmeans(df, n_clusters=5):
     precios = np.concatenate([df['maximo'].values, df['minimo'].values]).reshape(-1, 1)
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     kmeans.fit(precios)
     return sorted(kmeans.cluster_centers_.flatten())
 
-
 def proyectar_meta_temporal(df, temporalidad, horizonte_velas=HORIZONTE_VALIDACION):
-    """Calcula la meta proyectada de precio y el tiempo estimado en días u horas"""
     ultima = df.iloc[-1]
     precio_actual = ultima['cierre']
     atr = ultima['ATR']
     slope = ultima['Pendiente_Reg']
     
-    # Proyección combinada por ATR y pendiente de regresión
     desplazamiento_esperado = (slope * horizonte_velas) + (atr * 1.5)
     precio_proyectado = max(precio_actual + desplazamiento_esperado, precio_actual * 1.01)
     variacion_pct = ((precio_proyectado / precio_actual) - 1) * 100
@@ -216,7 +303,6 @@ def proyectar_meta_temporal(df, temporalidad, horizonte_velas=HORIZONTE_VALIDACI
         tiempo_texto = f"{horizonte_velas} velas"
 
     return tiempo_texto, precio_proyectado, variacion_pct
-
 
 def validar_senal_historica(df, condicion_activa, horizonte=HORIZONTE_VALIDACION):
     disparos = np.where(condicion_activa)[0]
@@ -236,7 +322,6 @@ def validar_senal_historica(df, condicion_activa, horizonte=HORIZONTE_VALIDACION
         'mc_confianza': prob_positiva_mc
     }
 
-
 def es_mercado_spot_valido(exchange, simbolo):
     mercado = exchange.markets.get(simbolo)
     return mercado and mercado.get('spot', False) is True and mercado.get('type', 'spot') == 'spot'
@@ -245,11 +330,12 @@ def es_mercado_spot_valido(exchange, simbolo):
 # ==========================================================================
 # 3. MÓDULOS DE MEMORIA E IA AISLADA
 # ==========================================================================
-def registrar_prediccion(simbolo, precio, rsi, atr, adx, vol, hurst, slope, r2, crt, prob_subida):
+def registrar_prediccion(simbolo, precio, rsi, atr, adx, vol, hurst, slope, r2, crt, cvd, delta_vol, prob_subida):
     nueva_fila = pd.DataFrame([{
         'timestamp': datetime.now(timezone.utc).isoformat(), 'simbolo': simbolo, 'precio_entrada': precio,
         'RSI': rsi, 'ATR': atr, 'ADX': adx, 'volumen': vol,
         'Hurst': hurst, 'Pendiente_Reg': slope, 'R2_Tendencia': r2, 'CRT_Valida': crt,
+        'CVD': cvd, 'Delta_Volumen': delta_vol,
         'prob_subida_predicha': prob_subida, 'precio_futuro': np.nan, 'exito_real': np.nan
     }])
     
@@ -276,18 +362,13 @@ def registrar_prediccion(simbolo, precio, rsi, atr, adx, vol, hurst, slope, r2, 
     except Exception:
         nueva_fila.to_csv(ARCHIVO_MEMORIA, mode='a', header=False, index=False)
 
-
 def auditar_memoria(exchange, horizonte_dias=HORIZONTE_VALIDACION):
-    if not os.path.exists(ARCHIVO_MEMORIA):
-        return
+    if not os.path.exists(ARCHIVO_MEMORIA): return
     try:
-        if os.path.getsize(ARCHIVO_MEMORIA) == 0:
-            return
+        if os.path.getsize(ARCHIVO_MEMORIA) == 0: return
         df_memoria = pd.read_csv(ARCHIVO_MEMORIA)
-        if df_memoria.empty:
-            return
-    except Exception:
-        return
+        if df_memoria.empty: return
+    except Exception: return
 
     df_memoria['timestamp'] = pd.to_datetime(df_memoria['timestamp'])
     ahora = datetime.now(timezone.utc)
@@ -306,23 +387,17 @@ def auditar_memoria(exchange, horizonte_dias=HORIZONTE_VALIDACION):
                     df_memoria.at[idx, 'exito_real'] = 1 if precio_futuro > fila['precio_entrada'] else 0
                     cambios = True
                 time.sleep(0.2)
-            except Exception:
-                pass
+            except Exception: pass
     if cambios:
         df_memoria.to_csv(ARCHIVO_MEMORIA, index=False)
 
-
 def calcular_riesgo_dinamico(riesgo_base=0.01):
-    if not os.path.exists(ARCHIVO_MEMORIA):
-        return riesgo_base, "SIN DATOS"
+    if not os.path.exists(ARCHIVO_MEMORIA): return riesgo_base, "SIN DATOS"
     try:
-        if os.path.getsize(ARCHIVO_MEMORIA) == 0:
-            return riesgo_base, "SIN DATOS"
+        if os.path.getsize(ARCHIVO_MEMORIA) == 0: return riesgo_base, "SIN DATOS"
         df_mem = pd.read_csv(ARCHIVO_MEMORIA)
-        if df_mem.empty:
-            return riesgo_base, "SIN DATOS"
-    except Exception:
-        return riesgo_base, "SIN DATOS"
+        if df_mem.empty: return riesgo_base, "SIN DATOS"
+    except Exception: return riesgo_base, "SIN DATOS"
 
     auditadas = df_mem.dropna(subset=['exito_real'])
     if len(auditadas) < MIN_CASOS_RIESGO_DINAMICO:
@@ -334,10 +409,8 @@ def calcular_riesgo_dinamico(riesgo_base=0.01):
         return riesgo_base * 1.5, f"GANADORA ({win_rate_reciente*100:.0f}%)"
     return riesgo_base, f"ESTABLE ({win_rate_reciente*100:.0f}%)"
 
-
 def detectar_regimen_kmeans(df_btc):
-    if len(df_btc) < 100:
-        return "DESCONOCIDO"
+    if len(df_btc) < 100: return "DESCONOCIDO"
     try:
         data = pd.DataFrame(index=df_btc.index)
         data['rendimiento'] = df_btc['cierre'].pct_change()
@@ -351,9 +424,7 @@ def detectar_regimen_kmeans(df_btc):
         medias = data.groupby('cluster')['tendencia'].mean().sort_values()
         mapa_regimenes = {medias.index[0]: 'BAJISTA', medias.index[1]: 'LATERAL', medias.index[2]: 'ALCISTA'}
         return mapa_regimenes[data['cluster'].iloc[-1]]
-    except Exception:
-        return "LATERAL"
-
+    except Exception: return "LATERAL"
 
 def inferir_probabilidad_xgboost(df, simbolo_actual):
     try:
@@ -361,7 +432,7 @@ def inferir_probabilidad_xgboost(df, simbolo_actual):
         df_ml['retorno_futuro'] = df_ml['cierre'].shift(-HORIZONTE_VALIDACION) / df_ml['cierre'] - 1
         df_ml['exito'] = (df_ml['retorno_futuro'] > 0).astype(int)
 
-        features = ['RSI', 'ATR', 'ADX', 'volumen', 'Hurst', 'Pendiente_Reg', 'R2_Tendencia', 'CRT_Valida']
+        features = ['RSI', 'ATR', 'ADX', 'volumen', 'Hurst', 'Pendiente_Reg', 'R2_Tendencia', 'CRT_Valida', 'CVD', 'Delta_Volumen']
         df_ml = df_ml.dropna(subset=features)
 
         X = df_ml[:-HORIZONTE_VALIDACION][features]
@@ -377,11 +448,9 @@ def inferir_probabilidad_xgboost(df, simbolo_actual):
                         y_memoria = df_mem['exito_real']
                         X = pd.concat([X, X_memoria], ignore_index=True)
                         y = pd.concat([y, y_memoria], ignore_index=True)
-            except Exception:
-                pass
+            except Exception: pass
 
-        if len(X) < 40 or y.nunique() < 2:
-            return None, None
+        if len(X) < 40 or y.nunique() < 2: return None, None
 
         xgb_model = XGBClassifier(
             n_estimators=100, max_depth=3, learning_rate=0.05,
@@ -393,8 +462,7 @@ def inferir_probabilidad_xgboost(df, simbolo_actual):
         X_actual = df_ml.iloc[-1:][features]
         probabilidades = xgb_model.predict_proba(X_actual)[0]
         return probabilidades[1] * 100, probabilidades[0] * 100
-    except Exception:
-        return None, None
+    except Exception: return None, None
 
 
 # ==========================================================================
@@ -406,7 +474,6 @@ def enviar_alerta_telegram(mensaje):
         return
     
     mensaje_plano = mensaje.replace('*', '').replace('`', '')
-    
     max_length = 4000
     mensajes = [mensaje_plano[i:i+max_length] for i in range(0, len(mensaje_plano), max_length)]
     
@@ -416,23 +483,17 @@ def enviar_alerta_telegram(mensaje):
             payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg_chunk}
             response = requests.post(url, json=payload, timeout=15)
             time.sleep(0.5)
-        except Exception as e:
-            print(f"❌ EXCEPCIÓN al conectar con Telegram (Parte {idx+1}): {e}")
-
+        except Exception as e: print(f"❌ EXCEPCIÓN al conectar con Telegram (Parte {idx+1}): {e}")
 
 def cargar_estado():
     if os.path.exists(ESTADO_PATH):
         try:
-            with open(ESTADO_PATH, 'r') as f:
-                return json.load(f)
-        except Exception:
-            pass
+            with open(ESTADO_PATH, 'r') as f: return json.load(f)
+        except Exception: pass
     return {}
 
-
 def guardar_estado(estado):
-    with open(ESTADO_PATH, 'w') as f:
-        json.dump(estado, f, indent=2)
+    with open(ESTADO_PATH, 'w') as f: json.dump(estado, f, indent=2)
 
 
 # ==========================================================================
@@ -440,15 +501,15 @@ def guardar_estado(estado):
 # ==========================================================================
 def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, rsi_compra, rsi_venta, sobreprecio_pct, riesgo_aplicado, tipo_estrategia="REVERSION"):
     velas = descargar_velas_cerradas(exchange, simbolo, temporalidad, VELAS_ANALISIS)
-    if not velas or len(velas) < 60:
-        return None
+    if not velas or len(velas) < 60: return None
 
     df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+    df = calcular_cvd(df)
+    
     df['RSI'] = calcular_rsi(df['cierre'], 14)
     df['VWMA_30'] = calcular_vwma(df, 30)
     df['ATR'] = calcular_atr(df, 14)
     df['ADX'] = calcular_adx(df, 14)
-
     df['Hurst'] = calcular_hurst_vectorizado(df['cierre'])
     slopes, r2s = calcular_regresion_rolling(df['cierre'])
     df['Pendiente_Reg'] = slopes
@@ -459,8 +520,7 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
     df['CRT_Valida'] = (df['CRT'] >= 0.70).astype(int)
 
     df = df.dropna().reset_index(drop=True)
-    if len(df) == 0:
-        return None
+    if len(df) == 0: return None
 
     ultima = df.iloc[-1]
     precio, rsi, vwma_30, atr = ultima['cierre'], ultima['RSI'], ultima['VWMA_30'], ultima['ATR']
@@ -492,15 +552,17 @@ def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, 
     denominador_atr = max(atr * 2.5, 0.0001)
     sugerencia_tamano = CAPITAL_REFERENCIA_USD * riesgo_aplicado / denominador_atr
     prob_subida, prob_bajada = inferir_probabilidad_xgboost(df, simbolo)
-    
     tiempo_est, precio_meta, var_pct = proyectar_meta_temporal(df, temporalidad)
+    
+    dia_pico, rec_hold = estimar_pico_confluencia(df, HORIZONTE_VALIDACION)
 
     return {
         'simbolo': simbolo, 'precio': precio, 'rsi': rsi, 'vwma_30': vwma_30,
         'accion': accion, 'etiqueta': etiqueta, 'validacion': validacion,
         'sugerencia_tamano': sugerencia_tamano, 'atr': atr, 'trailing_stop': trailing_stop,
         'prob_subida': prob_subida, 'prob_bajada': prob_bajada,
-        'tiempo_est': tiempo_est, 'precio_meta': precio_meta, 'var_pct': var_pct
+        'tiempo_est': tiempo_est, 'precio_meta': precio_meta, 'var_pct': var_pct,
+        'dia_pico': dia_pico, 'rec_hold': rec_hold
     }
 
 
@@ -570,6 +632,8 @@ def ejecutar_bot_maestro():
                 continue
 
             df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+            df = calcular_cvd(df)
+
             df['RSI'], _, df['BB_Lower'] = calcular_rsi(df['cierre'], 14), None, calcular_bollinger_bands(df['cierre'])[2]
             df['VWMA_20'], df['ATR'], df['ADX'] = calcular_vwma(df, 20), calcular_atr(df, 14), calcular_adx(df, 14)
             df['Max_20'] = df['cierre'].shift(1).rolling(20).max()
@@ -591,9 +655,7 @@ def ejecutar_bot_maestro():
             patron_smc, hist_alc_smc, hist_baj_smc = detectar_patrones_smc_historico(df)
 
             if regimen_macro == "BAJISTA":
-                cuantitativo_ok = False
-                breakout_ok = False
-                patron_smc = None
+                cuantitativo_ok, breakout_ok, patron_smc = False, False, None
             elif regimen_macro == "LATERAL":
                 cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['cierre'] < ultima['VWMA_20'])
                 breakout_ok = False
@@ -616,14 +678,11 @@ def ejecutar_bot_maestro():
 
                     es_alcista = cuantitativo_ok or breakout_ok or (patron_smc and patron_smc['tipo'] == "SMC_ALCISTA")
                     if es_alcista:
-                        if rsi_1h < 75 and cierre_1h >= (vwma_1h * 0.99):
-                            confluencia_1h_ok = True
+                        if rsi_1h < 75 and cierre_1h >= (vwma_1h * 0.99): confluencia_1h_ok = True
                     else:
-                        if rsi_1h > 25 and cierre_1h <= (vwma_1h * 1.01):
-                            confluencia_1h_ok = True
+                        if rsi_1h > 25 and cierre_1h <= (vwma_1h * 1.01): confluencia_1h_ok = True
                 
-                if not en_zona_fuerte or not confluencia_1h_ok:
-                    continue
+                if not en_zona_fuerte or not confluencia_1h_ok: continue
 
                 correlacion_peligrosa = False
                 retornos_actuales = df['cierre'].tail(50).pct_change().dropna().values
@@ -633,12 +692,12 @@ def ejecutar_bot_maestro():
                         if not np.isnan(corr) and corr > 0.85:
                             correlacion_peligrosa = True
                             break
-                if correlacion_peligrosa:
-                    continue
+                if correlacion_peligrosa: continue
 
                 historico_candidatas_aceptadas[s] = retornos_actuales
                 prob_subida, prob_bajada = inferir_probabilidad_xgboost(df, s)
                 tiempo_est, precio_meta, var_pct = proyectar_meta_temporal(df, TEMPORALIDAD_SATELITE)
+                dia_pico, rec_hold = estimar_pico_confluencia(df, HORIZONTE_VALIDACION)
 
                 if cuantitativo_ok:
                     tipo_al = 'CUANTITATIVO_REVERSION'
@@ -654,20 +713,28 @@ def ejecutar_bot_maestro():
                     condicion_smc = hist_alc_smc if patron_smc['tipo'] == "SMC_ALCISTA" else hist_baj_smc
                     val = validar_senal_historica(df, condicion_smc)
 
+                riesgo_matematico = calcular_kelly_fraccional(prob_subida, tp, sl, ultima['cierre'])
+                
+                if riesgo_matematico <= 0:
+                    continue
+
+                sugerencia_tamano_optimizada = CAPITAL_REFERENCIA_USD * riesgo_matematico / max(abs(ultima['cierre'] - sl), 0.0001)
+
                 if prob_subida is not None:
-                    registrar_prediccion(s, ultima['cierre'], ultima['RSI'], ultima['ATR'], ultima['ADX'], ultima['volumen'], ultima['Hurst'], ultima['Pendiente_Reg'], ultima['R2_Tendencia'], ultima['CRT_Valida'], prob_subida)
+                    registrar_prediccion(s, ultima['cierre'], ultima['RSI'], ultima['ATR'], ultima['ADX'], ultima['volumen'], ultima['Hurst'], ultima['Pendiente_Reg'], ultima['R2_Tendencia'], ultima['CRT_Valida'], ultima['CVD'], ultima['Delta_Volumen'], prob_subida)
+                
                 alertas_satelite.append({
                     'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': tipo_al, 'tp': tp, 'sl': sl, 
-                    'sugerencia_tamano': CAPITAL_REFERENCIA_USD * riesgo_dinamico / max(abs(ultima['cierre'] - sl), 0.0001), 
+                    'sugerencia_tamano': sugerencia_tamano_optimizada, 
                     'validacion': val, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada,
-                    'tiempo_est': tiempo_est, 'precio_meta': precio_meta, 'var_pct': var_pct
+                    'tiempo_est': tiempo_est, 'precio_meta': precio_meta, 'var_pct': var_pct,
+                    'dia_pico': dia_pico, 'rec_hold': rec_hold
                 })
                 estado_nuevo[s] = tipo_al
 
             time.sleep(0.3)
 
-    except Exception as e:
-        print(f"⚠️ Error procesando el bloque satélite: {e}")
+    except Exception as e: print(f"⚠️ Error procesando el bloque satélite: {e}")
 
     # ==========================================================================
     # ENVÍO INCONDICIONAL A TELEGRAM (TEXTO PLANO / SEGURO)
@@ -677,7 +744,7 @@ def ejecutar_bot_maestro():
     msj = f"🚨 REPORTE IA (INSTITUCIONAL) — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
     msj += f"🌐 Régimen Macro: {regimen_macro}\n"
     msj += f"🔄 Flujo de Capital: {altseason_estado}\n"
-    msj += f"🧠 Racha IA: {estado_racha} | Riesgo actual: {riesgo_dinamico*100:.2f}%\n\n"
+    msj += f"🧠 Racha IA: {estado_racha} | Riesgo base actual: {riesgo_dinamico*100:.2f}%\n\n"
 
     if todas_las_alertas_largo_plazo:
         msj += "📊 ESTADO GENERAL DEL PORTAFOLIO\n"
@@ -685,6 +752,7 @@ def ejecutar_bot_maestro():
             msj += f"• {o['simbolo']} | ${o['precio']:,.4f}\n  {o['etiqueta']}\n"
             msj += f"  🛡️ Trailing Stop: ${o['trailing_stop']:,.4f}\n"
             msj += f"  ⏳ Horizonte Estimado: {o['tiempo_est']} | Meta: ${o['precio_meta']:,.4f} (+{o['var_pct']:.1f}%)\n"
+            msj += f"  📅 Pico Estimado: Vela {o['dia_pico']} | 🧩 {o['rec_hold']}\n"
             if o.get('prob_subida') is not None:
                 msj += f"  🤖 Probabilidad IA: 📈 {o['prob_subida']:.1f}% | 📉 {o['prob_bajada']:.1f}%\n"
         msj += "\n"
@@ -695,7 +763,9 @@ def ejecutar_bot_maestro():
             emoji = '🟢' if 'ALCISTA' in o['tipo_alerta'] or 'REVERSION' in o['tipo_alerta'] or 'BREAKOUT' in o['tipo_alerta'] else '🔴'
             msj += f"{emoji} {o['tipo_alerta'].replace('_', ' ')} | {o['simbolo']}\n  Entrada: ${o['precio']:,.4f}\n  🎯 TP: ${o['tp']:,.4f} | 🛑 SL: ${o['sl']:,.4f}\n"
             msj += f"  ⏳ Horizonte Estimado: {o['tiempo_est']} | Meta: ${o['precio_meta']:,.4f} (+{o['var_pct']:.1f}%)\n"
+            msj += f"  📅 Pico Estimado: Vela {o['dia_pico']} | 🧩 {o['rec_hold']}\n"
             msj += f"  🧩 Filtro Avanzado: 4H+1H Confluencia ✅ | Zona Institucional ✅\n"
+            msj += f"  ⚖️ Gestión (Kelly): Tamaño sugerido ${o['sugerencia_tamano']:,.2f}\n"
             if o.get('prob_subida') is not None:
                 msj += f"  🤖 Probabilidad IA: 📈 {o['prob_subida']:.1f}% | 📉 {o['prob_bajada']:.1f}%\n"
             if o['validacion'] and o['validacion']['suficiente']:
@@ -710,7 +780,6 @@ def ejecutar_bot_maestro():
 
     enviar_alerta_telegram(msj)
     guardar_estado(estado_nuevo)
-
 
 if __name__ == '__main__':
     ejecutar_bot_maestro()
