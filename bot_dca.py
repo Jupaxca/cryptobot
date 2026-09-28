@@ -1,14 +1,14 @@
-from datetime import datetime, timezone
-import json
-import os
-import time
-import warnings
 import ccxt
-import numpy as np
 import pandas as pd
+import numpy as np
+import os
+import json
 import requests
-from sklearn.cluster import KMeans
+import warnings
+import time
+from datetime import datetime, timezone
 from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
 from xgboost import XGBClassifier, XGBRegressor
 
 warnings.filterwarnings('ignore')
@@ -16,48 +16,16 @@ warnings.filterwarnings('ignore')
 # ==========================================================================
 # 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO (NARRATIVAS 2026)
 # ==========================================================================
-NUCLEO_CONSERVADOR = [
-    'BTC/USDT',
-    'ETH/USDT',
-    'SOL/USDT',
-    'BNB/USDT',
-    'LINK/USDT',
-]
+NUCLEO_CONSERVADOR = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'LINK/USDT']
 TEMPORALIDAD_NUCLEO = '1d'
 
-NIVEL_CRECIMIENTO = [
-    'NEAR/USDT',
-    'TAO/USDT',
-    'SEI/USDT',
-    'ADA/USDT',
-    'AVAX/USDT',
-    'RENDER/USDT',
-    'FET/USDT',
-    'TIA/USDT',
-    'ARB/USDT',
-]
+NIVEL_CRECIMIENTO = ['NEAR/USDT', 'TAO/USDT', 'SEI/USDT', 'ADA/USDT', 'AVAX/USDT', 'RENDER/USDT', 'FET/USDT', 'TIA/USDT', 'ARB/USDT']
 TEMPORALIDAD_CRECIMIENTO = '1d'
 
-SEGUIMIENTO_ESTRATEGICO = [
-    'XRP/USDT',
-    'SUI/USDT',
-    'APT/USDT',
-    'ONDO/USDT',
-    'OM/USDT',
-    'HNT/USDT',
-    'FIL/USDT',
-    'PENDLE/USDT',
-]
+SEGUIMIENTO_ESTRATEGICO = ['XRP/USDT', 'SUI/USDT', 'APT/USDT', 'ONDO/USDT', 'OM/USDT', 'HNT/USDT', 'FIL/USDT', 'PENDLE/USDT']
 TEMPORALIDAD_SEGUIMIENTO = '1d'
 
-ALTO_RIESGO = [
-    'PEPE/USDT',
-    'WIF/USDT',
-    'POPCAT/USDT',
-    'KAS/USDT',
-    'THETA/USDT',
-    'ASTR/USDT',
-]
+ALTO_RIESGO = ['PEPE/USDT', 'WIF/USDT', 'POPCAT/USDT', 'KAS/USDT', 'THETA/USDT', 'ASTR/USDT']
 TEMPORALIDAD_ALTO_RIESGO = '1d'
 
 TEMPORALIDAD_SATELITE = '4h'
@@ -85,726 +53,733 @@ SLIPPAGE = 0.0005
 
 MIN_CASOS_RIESGO_DINAMICO = 20
 
-
 # ==========================================================================
 # 2. PROCESAMIENTO TÉCNICO Y MATEMÁTICAS
 # ==========================================================================
 def descargar_velas_cerradas(exchange, simbolo, temporalidad, limit):
-  try:
-    velas = exchange.fetch_ohlcv(simbolo, timeframe=temporalidad, limit=limit)
-    return velas
-  except Exception:
-    return None
-
+    try:
+        velas = exchange.fetch_ohlcv(simbolo, timeframe=temporalidad, limit=limit)
+        return velas
+    except Exception:
+        return None
 
 def calcular_cvd(df):
-  """Inferencia Estadística de Presión de Ballenas (CVD)"""
-  rango = df['maximo'] - df['minimo']
-  rango = rango.replace(0, 0.0001)
+    """Inferencia Estadística de Presión de Ballenas (CVD)"""
+    rango = df['maximo'] - df['minimo']
+    rango = rango.replace(0, 0.0001)
+    
+    fuerza_compradora = ((df['cierre'] - df['minimo']) / rango) * df['volumen']
+    fuerza_vendedora = df['volumen'] - fuerza_compradora
+    
+    df['Delta_Volumen'] = fuerza_compradora - fuerza_vendedora
+    df['CVD'] = df['Delta_Volumen'].cumsum()
+    return df
 
-  fuerza_compradora = ((df['cierre'] - df['minimo']) / rango) * df['volumen']
-  fuerza_vendedora = df['volumen'] - fuerza_compradora
-
-  df['Delta_Volumen'] = fuerza_compradora - fuerza_vendedora
-  df['CVD'] = df['Delta_Volumen'].cumsum()
-  return df
-
-
-def calcular_kelly_fraccional(
-    prob_exito_pct, tp_precio, sl_precio, precio_entrada, fraccion=0.5
-):
-  """Criterio de Kelly matemático para gestión de riesgo óptimo"""
-  if prob_exito_pct is None:
-    return RIESGO_POR_TRADE
-
-  p = prob_exito_pct / 100.0
-  q = 1.0 - p
-
-  distancia_tp = abs(tp_precio - precio_entrada)
-  distancia_sl = abs(precio_entrada - sl_precio)
-  if distancia_sl == 0:
-    return 0.0
-
-  b = distancia_tp / distancia_sl
-  kelly_pct = p - (q / b)
-
-  if kelly_pct <= 0:
-    return 0.0
-
-  riesgo_final = kelly_pct * fraccion
-  return max(min(riesgo_final, 0.05), 0.005)
-
+def calcular_kelly_fraccional(prob_exito_pct, tp_precio, sl_precio, precio_entrada, fraccion=0.5):
+    """Criterio de Kelly matemático para gestión de riesgo óptimo"""
+    if prob_exito_pct is None:
+        return RIESGO_POR_TRADE
+        
+    p = prob_exito_pct / 100.0
+    q = 1.0 - p
+    
+    distancia_tp = abs(tp_precio - precio_entrada)
+    distancia_sl = abs(precio_entrada - sl_precio)
+    if distancia_sl == 0: return 0.0
+    
+    b = distancia_tp / distancia_sl
+    kelly_pct = p - (q / b)
+    
+    if kelly_pct <= 0:
+        return 0.0
+        
+    riesgo_final = kelly_pct * fraccion
+    return max(min(riesgo_final, 0.05), 0.005)
 
 def estimar_pico_confluencia(df, horizonte_velas=HORIZONTE_VALIDACION):
-  """Combina estadística de Momentum y Machine Learning (Regressor) para calcular el día/vela óptimo de Hold"""
-  n = len(df)
-  if n < 100:
-    return 7, 'Hold ~7 velas (Faltan datos históricos)'
+    """Combina estadística de Momentum y Machine Learning (Regressor) para calcular el día/vela óptimo de Hold"""
+    n = len(df)
+    if n < 100:
+        return 7, "Hold ~7 velas (Faltan datos históricos)"
 
-  # 1. CEREBRO ESTADÍSTICO
-  dias_al_pico_hist = []
-  for i in range(max(0, n - 120 - horizonte_velas), n - horizonte_velas):
-    ventana_futura = df['maximo'].iloc[i + 1 : i + 1 + horizonte_velas].values
-    if len(ventana_futura) == horizonte_velas:
-      dias_al_pico_hist.append(np.argmax(ventana_futura) + 1)
+    # 1. CEREBRO ESTADÍSTICO
+    dias_al_pico_hist = []
+    for i in range(max(0, n - 120 - horizonte_velas), n - horizonte_velas):
+        ventana_futura = df['maximo'].iloc[i + 1 : i + 1 + horizonte_velas].values
+        if len(ventana_futura) == horizonte_velas:
+            dias_al_pico_hist.append(np.argmax(ventana_futura) + 1)
 
-  dia_base_estadistico = (
-      int(np.median(dias_al_pico_hist)) if dias_al_pico_hist else 7
-  )
-  ultima = df.iloc[-1]
-
-  if ultima['RSI'] > 70:
-    dia_estadistico = max(1, dia_base_estadistico - 3)
-  elif ultima['ADX'] > 28 and ultima['Pendiente_Reg'] > 0:
-    dia_estadistico = min(horizonte_velas, dia_base_estadistico + 2)
-  else:
-    dia_estadistico = dia_base_estadistico
-
-  # 2. CEREBRO IA (XGBoost Regressor)
-  dia_ia = dia_estadistico
-  confianza_ia = False
-
-  try:
-    df_ml = df.copy()
-    indexer = pd.api.indexers.FixedForwardWindowIndexer(
-        window_size=horizonte_velas
-    )
-    df_ml['dia_pico_futuro'] = df_ml['maximo'].rolling(window=indexer).apply(
-        lambda x: np.argmax(x) + 1, raw=True
-    )
-
-    features = [
-        'RSI',
-        'ATR',
-        'ADX',
-        'volumen',
-        'Hurst',
-        'Pendiente_Reg',
-        'CRT_Valida',
-        'CVD',
-        'Delta_Volumen',
-    ]
-    df_ml = df_ml.dropna(subset=features + ['dia_pico_futuro'])
-
-    X = df_ml[:-horizonte_velas][features]
-    y = df_ml[:-horizonte_velas]['dia_pico_futuro']
-
-    if len(X) >= 40:
-      modelo_dias = XGBRegressor(
-          n_estimators=50, max_depth=3, learning_rate=0.05, random_state=42
-      )
-      modelo_dias.fit(X, y)
-
-      X_actual = df_ml.iloc[-1:][features]
-      prediccion = modelo_dias.predict(X_actual)[0]
-      dia_ia = min(max(int(round(prediccion)), 1), horizonte_velas)
-      confianza_ia = True
-  except Exception:
-    pass
-
-  # 3. CONFLUENCIA (Sinergia de Modelos)
-  dia_final = int(round((dia_estadistico + dia_ia) / 2))
-  diferencia = abs(dia_estadistico - dia_ia)
-
-  if confianza_ia:
-    if diferencia <= 2:
-      estatus = (
-          f'Alta Confianza (Modelos Sincronizados: Est. {dia_estadistico} | IA'
-          f' {dia_ia})'
-      )
-    elif diferencia >= 6:
-      estatus = (
-          f'Volatilidad (Discrepancia: Est. {dia_estadistico} vs IA {dia_ia})'
-      )
+    dia_base_estadistico = int(np.median(dias_al_pico_hist)) if dias_al_pico_hist else 7
+    ultima = df.iloc[-1]
+    
+    if ultima['RSI'] > 70:
+        dia_estadistico = max(1, dia_base_estadistico - 3)
+    elif ultima['ADX'] > 28 and ultima['Pendiente_Reg'] > 0:
+        dia_estadistico = min(horizonte_velas, dia_base_estadistico + 2)
     else:
-      estatus = f'Promedio calculado (Est. {dia_estadistico} | IA {dia_ia})'
-  else:
-    estatus = 'Análisis Estadístico (IA sin datos suficientes)'
+        dia_estadistico = dia_base_estadistico
 
-  recomendacion_hold = f'Hold ~{dia_final} velas | {estatus}'
-  return dia_final, recomendacion_hold
+    # 2. CEREBRO IA (XGBoost Regressor)
+    dia_ia = dia_estadistico
+    confianza_ia = False
+    
+    try:
+        df_ml = df.copy()
+        indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=horizonte_velas)
+        df_ml['dia_pico_futuro'] = df_ml['maximo'].rolling(window=indexer).apply(lambda x: np.argmax(x) + 1, raw=True)
+        
+        features = ['RSI', 'ATR', 'ADX', 'volumen', 'Hurst', 'Pendiente_Reg', 'CRT_Valida', 'CVD', 'Delta_Volumen']
+        df_ml = df_ml.dropna(subset=features + ['dia_pico_futuro'])
+        
+        X = df_ml[:-horizonte_velas][features]
+        y = df_ml[:-horizonte_velas]['dia_pico_futuro']
+        
+        if len(X) >= 40:
+            modelo_dias = XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.05, random_state=42)
+            modelo_dias.fit(X, y)
+            
+            X_actual = df_ml.iloc[-1:][features]
+            prediccion = modelo_dias.predict(X_actual)[0]
+            dia_ia = min(max(int(round(prediccion)), 1), horizonte_velas)
+            confianza_ia = True
+    except Exception:
+        pass
 
+    # 3. CONFLUENCIA (Sinergia de Modelos)
+    dia_final = int(round((dia_estadistico + dia_ia) / 2))
+    diferencia = abs(dia_estadistico - dia_ia)
+    
+    if confianza_ia:
+        if diferencia <= 2:
+            estatus = f"Alta Confianza (Modelos Sincronizados: Est. {dia_estadistico} | IA {dia_ia})"
+        elif diferencia >= 6:
+            estatus = f"Volatilidad (Discrepancia: Est. {dia_estadistico} vs IA {dia_ia})"
+        else:
+            estatus = f"Promedio calculado (Est. {dia_estadistico} | IA {dia_ia})"
+    else:
+        estatus = "Análisis Estadístico (IA sin datos suficientes)"
+
+    recomendacion_hold = f"Hold ~{dia_final} velas | {estatus}"
+    return dia_final, recomendacion_hold
 
 def calcular_rsi(series, period=14):
-  delta = series.diff()
-  gain = delta.where(delta > 0, 0).rolling(window=period).mean()
-  loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-  rs = gain / loss
-  return (100 - (100 / (1 + rs))).replace([np.inf, -np.inf], 100)
-
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return (100 - (100 / (1 + rs))).replace([np.inf, -np.inf], 100)
 
 def calcular_vwma(df, period=30):
-  return (df['cierre'] * df['volumen']).rolling(period).sum() / df[
-      'volumen'
-  ].rolling(period).sum()
-
+    return (df['cierre'] * df['volumen']).rolling(period).sum() / df['volumen'].rolling(period).sum()
 
 def calcular_bollinger_bands(series, period=20, std_dev=2):
-  middle = series.rolling(window=period).mean()
-  std = series.rolling(window=period).std()
-  return middle + (std * std_dev), middle, middle - (std * std_dev)
-
+    middle = series.rolling(window=period).mean()
+    std = series.rolling(window=period).std()
+    return middle + (std * std_dev), middle, middle - (std * std_dev)
 
 def calcular_atr(df, period=14):
-  tr = pd.concat(
-      [
-          df['maximo'] - df['minimo'],
-          (df['maximo'] - df['cierre'].shift(1)).abs(),
-          (df['minimo'] - df['cierre'].shift(1)).abs(),
-      ],
-      axis=1,
-  ).max(axis=1)
-  return tr.rolling(period).mean()
-
+    tr = pd.concat([
+        df['maximo'] - df['minimo'],
+        (df['maximo'] - df['cierre'].shift(1)).abs(),
+        (df['minimo'] - df['cierre'].shift(1)).abs()
+    ], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
 
 def calcular_adx(df, period=14):
-  up_move = df['maximo'] - df['maximo'].shift(1)
-  down_move = df['minimo'].shift(1) - df['minimo']
-  plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-  minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-  atr = calcular_atr(df, period)
-  plus_di = 100 * (
-      pd.Series(plus_dm, index=df.index).rolling(period).mean() / atr
-  )
-  minus_di = 100 * (
-      pd.Series(minus_dm, index=df.index).rolling(period).mean() / atr
-  )
-  dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
-  return dx.replace([np.inf, -np.inf], np.nan).rolling(period).mean()
-
+    up_move = df['maximo'] - df['maximo'].shift(1)
+    down_move = df['minimo'].shift(1) - df['minimo']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    atr = calcular_atr(df, period)
+    plus_di = 100 * (pd.Series(plus_dm, index=df.index).rolling(period).mean() / atr)
+    minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(period).mean() / atr)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+    return dx.replace([np.inf, -np.inf], np.nan).rolling(period).mean()
 
 def calcular_hurst_vectorizado(series, window=100, max_lag=20):
-  hursts = []
-  vals = series.values
-  for i in range(len(vals)):
-    if i < window:
-      hursts.append(0.5)
-      continue
-    sub = vals[i - window : i]
-    try:
-      lags = range(2, min(max_lag, window // 2))
-      tau = [np.sqrt(np.std(sub[l:] - sub[:-l])) for l in lags]
-      poly = np.polyfit(np.log(lags), np.log(np.maximum(tau, 1e-8)), 1)
-      hursts.append(poly[0] * 2.0)
-    except Exception:
-      hursts.append(0.5)
-  return pd.Series(hursts, index=series.index)
-
+    hursts = []
+    vals = series.values
+    for i in range(len(vals)):
+        if i < window:
+            hursts.append(0.5)
+            continue
+        sub = vals[i - window:i]
+        try:
+            lags = range(2, min(max_lag, window // 2))
+            tau = [np.sqrt(np.std(sub[l:] - sub[:-l])) for l in lags]
+            poly = np.polyfit(np.log(lags), np.log(np.maximum(tau, 1e-8)), 1)
+            hursts.append(poly[0] * 2.0)
+        except Exception:
+            hursts.append(0.5)
+    return pd.Series(hursts, index=series.index)
 
 def calcular_regresion_rolling(series, window=20):
-  slopes, r2s = [], []
-  vals = series.values
-  for i in range(len(vals)):
-    if i < window:
-      slopes.append(0.0)
-      r2s.append(0.0)
-      continue
-    y = vals[i - window : i]
-    x = np.arange(window)
-    if np.std(y) == 0:
-      slopes.append(0.0)
-      r2s.append(0.0)
-    else:
-      slope, _ = np.polyfit(x, y, 1)
-      corr = np.corrcoef(x, y)[0, 1]
-      slopes.append(slope)
-      r2s.append(corr**2 if not np.isnan(corr) else 0.0)
-  return pd.Series(slopes, index=series.index), pd.Series(
-      r2s, index=series.index
-  )
-
+    slopes, r2s = [], []
+    vals = series.values
+    for i in range(len(vals)):
+        if i < window:
+            slopes.append(0.0)
+            r2s.append(0.0)
+            continue
+        y = vals[i - window:i]
+        x = np.arange(window)
+        if np.std(y) == 0:
+            slopes.append(0.0)
+            r2s.append(0.0)
+        else:
+            slope, _ = np.polyfit(x, y, 1)
+            corr = np.corrcoef(x, y)[0, 1]
+            slopes.append(slope)
+            r2s.append(corr ** 2 if not np.isnan(corr) else 0.0)
+    return pd.Series(slopes, index=series.index), pd.Series(r2s, index=series.index)
 
 def detectar_patrones_smc_historico(df, ventana_estructura=15):
-  n = len(df)
-  senales_alcistas = np.zeros(n, dtype=bool)
-  senales_bajistas = np.zeros(n, dtype=bool)
-  ultima_senal = None
+    n = len(df)
+    senales_alcistas = np.zeros(n, dtype=bool)
+    senales_bajistas = np.zeros(n, dtype=bool)
+    ultima_senal = None
 
-  if n < ventana_estructura + 10:
+    if n < ventana_estructura + 10:
+        return ultima_senal, senales_alcistas, senales_bajistas
+
+    vol_media_20 = df['volumen'].rolling(20).mean()
+
+    for i in range(ventana_estructura + 5, n):
+        penultima_idx = i - 1
+        inicio_ventana = max(0, i - ventana_estructura)
+        fin_ventana = max(0, i - 2)
+        if fin_ventana <= inicio_ventana:
+            continue
+
+        max_estructura = df['maximo'].iloc[inicio_ventana:fin_ventana].max()
+        min_estructura = df['minimo'].iloc[inicio_ventana:fin_ventana].min()
+
+        cierre_penultima = df['cierre'].iloc[penultima_idx]
+        vol_penultima = df['volumen'].iloc[penultima_idx]
+        idx_vol_media = penultima_idx - 1
+        if idx_vol_media < 0 or pd.isna(vol_media_20.iloc[idx_vol_media]):
+            continue
+        vol_media_penultima = vol_media_20.iloc[idx_vol_media]
+
+        if cierre_penultima > max_estructura and vol_penultima > vol_media_penultima:
+            senales_alcistas[i] = True
+        if cierre_penultima < min_estructura and vol_penultima > vol_media_penultima:
+            senales_bajistas[i] = True
+
+    if senales_alcistas[-1]:
+        sl = df['minimo'].iloc[-10:].min() * 0.995
+        tp = df['cierre'].iloc[-1] + (df['cierre'].iloc[-1] - sl) * 2.0
+        ultima_senal = {"tipo": "SMC_ALCISTA", "sl": sl, "tp": tp}
+    elif senales_bajistas[-1]:
+        sl = df['maximo'].iloc[-10:].max() * 1.005
+        tp = df['cierre'].iloc[-1] - (sl - df['cierre'].iloc[-1]) * 2.0
+        ultima_senal = {"tipo": "SMC_BAJISTA", "sl": sl, "tp": tp}
+
     return ultima_senal, senales_alcistas, senales_bajistas
 
-  vol_media_20 = df['volumen'].rolling(20).mean()
-
-  for i in range(ventana_estructura + 5, n):
-    penultima_idx = i - 1
-    inicio_ventana = max(0, i - ventana_estructura)
-    fin_ventana = max(0, i - 2)
-    if fin_ventana <= inicio_ventana:
-      continue
-
-    max_estructura = df['maximo'].iloc[inicio_ventana:fin_ventana].max()
-    min_estructura = df['minimo'].iloc[inicio_ventana:fin_ventana].min()
-
-    cierre_penultima = df['cierre'].iloc[penultima_idx]
-    vol_penultima = df['volumen'].iloc[penultima_idx]
-    idx_vol_media = penultima_idx - 1
-    if idx_vol_media < 0 or pd.isna(vol_media_20.iloc[idx_vol_media]):
-      continue
-    vol_media_penultima = vol_media_20.iloc[idx_vol_media]
-
-    if (
-        cierre_penultima > max_estructura
-        and vol_penultima > vol_media_penultima
-    ):
-      senales_alcistas[i] = True
-    if (
-        cierre_penultima < min_estructura
-        and vol_penultima > vol_media_penultima
-    ):
-      senales_bajistas[i] = True
-
-  if senales_alcistas[-1]:
-    sl = df['minimo'].iloc[-10:].min() * 0.995
-    tp = df['cierre'].iloc[-1] + (df['cierre'].iloc[-1] - sl) * 2.0
-    ultima_senal = {'tipo': 'SMC_ALCISTA', 'sl': sl, 'tp': tp}
-  elif senales_bajistas[-1]:
-    sl = df['maximo'].iloc[-10:].max() * 1.005
-    tp = df['cierre'].iloc[-1] - (sl - df['cierre'].iloc[-1]) * 2.0
-    ultima_senal = {'tipo': 'SMC_BAJISTA', 'sl': sl, 'tp': tp}
-
-  return ultima_senal, senales_alcistas, senales_bajistas
-
-
 def detectar_zonas_rechazo_kmeans(df, n_clusters=5):
-  precios = np.concatenate(
-      [df['maximo'].values, df['minimo'].values]
-  ).reshape(-1, 1)
-  kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-  kmeans.fit(precios)
-  return sorted(kmeans.cluster_centers_.flatten())
-
+    precios = np.concatenate([df['maximo'].values, df['minimo'].values]).reshape(-1, 1)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    kmeans.fit(precios)
+    return sorted(kmeans.cluster_centers_.flatten())
 
 def proyectar_meta_temporal(df, temporalidad, horizonte_velas=HORIZONTE_VALIDACION):
-  ultima = df.iloc[-1]
-  precio_actual = ultima['cierre']
-  atr = ultima['ATR']
-  slope = ultima['Pendiente_Reg']
+    ultima = df.iloc[-1]
+    precio_actual = ultima['cierre']
+    atr = ultima['ATR']
+    slope = ultima['Pendiente_Reg']
+    
+    desplazamiento_esperado = (slope * horizonte_velas) + (atr * 1.5)
+    precio_proyectado = max(precio_actual + desplazamiento_esperado, precio_actual * 1.01)
+    variacion_pct = ((precio_proyectado / precio_actual) - 1) * 100
 
-  desplazamiento_esperado = (slope * horizonte_velas) + (atr * 1.5)
-  precio_proyectado = max(
-      precio_actual + desplazamiento_esperado, precio_actual * 1.01
-  )
-  variacion_pct = ((precio_proyectado / precio_actual) - 1) * 100
+    if temporalidad == '1d':
+        tiempo_texto = f"{horizonte_velas} días"
+    elif temporalidad == '4h':
+        horas = horizonte_velas * 4
+        dias = horas / 24
+        tiempo_texto = f"{horas}h (~{dias:.1f} días)"
+    else:
+        tiempo_texto = f"{horizonte_velas} velas"
 
-  if temporalidad == '1d':
-    tiempo_texto = f'{horizonte_velas} días'
-  elif temporalidad == '4h':
-    horas = horizonte_velas * 4
-    dias = horas / 24
-    tiempo_texto = f'{horas}h (~{dias:.1f} días)'
-  else:
-    tiempo_texto = f'{horizonte_velas} velas'
-
-  return tiempo_texto, precio_proyectado, variacion_pct
-
+    return tiempo_texto, precio_proyectado, variacion_pct
 
 def validar_senal_historica(df, condicion_activa, horizonte=HORIZONTE_VALIDACION):
-  disparos = np.where(condicion_activa)[0]
-  disparos = disparos[disparos < len(df) - horizonte]
-  if len(disparos) < 5:
+    disparos = np.where(condicion_activa)[0]
+    disparos = disparos[disparos < len(df) - horizonte]
+    if len(disparos) < 5:
+        return {'n_casos': len(disparos), 'win_rate': None, 'retorno_promedio': None, 'suficiente': False, 'mc_confianza': None}
+
+    costo_total = (COMISION_EXCHANGE + SLIPPAGE) * 2
+    retornos = np.array([((df.iloc[i + horizonte]['cierre'] / df.iloc[i]['cierre']) - 1 - costo_total) * 100 for i in disparos])
+
+    np.random.seed(42)
+    simulaciones_mc = [np.random.choice(retornos, size=len(retornos), replace=True).sum() for _ in range(1000)]
+    prob_positiva_mc = (np.array(simulaciones_mc) > 0).mean() * 100
     return {
-        'n_casos': len(disparos),
-        'win_rate': None,
-        'retorno_promedio': None,
-        'suficiente': False,
-        'mc_confianza': None,
+        'n_casos': len(disparos), 'win_rate': (retornos > 0).mean() * 100,
+        'retorno_promedio': retornos.mean(), 'suficiente': len(disparos) >= 15,
+        'mc_confianza': prob_positiva_mc
     }
 
-  costo_total = (COMISION_EXCHANGE + SLIPPAGE) * 2
-  retornos = np.array([
-      (
-          (df.iloc[i + horizonte]['cierre'] / df.iloc[i]['cierre'])
-          - 1
-          - costo_total
-      )
-      * 100
-      for i in disparos
-  ])
-
-  np.random.seed(42)
-  simulaciones_mc = [
-      np.random.choice(retornos, size=len(retornos), replace=True).sum()
-      for _ in range(1000)
-  ]
-  prob_positiva_mc = (np.array(simulaciones_mc) > 0).mean() * 100
-  return {
-      'n_casos': len(disparos),
-      'win_rate': (retornos > 0).mean() * 100,
-      'retorno_promedio': retornos.mean(),
-      'suficiente': len(disparos) >= 15,
-      'mc_confianza': prob_positiva_mc,
-  }
-
-
 def es_mercado_spot_valido(exchange, simbolo):
-  mercado = exchange.markets.get(simbolo)
-  return (
-      mercado
-      and mercado.get('spot', False) is True
-      and mercado.get('type', 'spot') == 'spot'
-  )
+    mercado = exchange.markets.get(simbolo)
+    return mercado and mercado.get('spot', False) is True and mercado.get('type', 'spot') == 'spot'
 
 
 # ==========================================================================
 # 3. MÓDULOS DE MEMORIA E IA AISLADA
 # ==========================================================================
-def registrar_prediccion(
-    simbolo,
-    precio,
-    rsi,
-    atr,
-    adx,
-    vol,
-    hurst,
-    slope,
-    r2,
-    crt,
-    cvd,
-    delta_vol,
-    prob_subida,
-):
-  nueva_fila = pd.DataFrame([{
-      'timestamp': datetime.now(timezone.utc).isoformat(),
-      'simbolo': simbolo,
-      'precio_entrada': precio,
-      'RSI': rsi,
-      'ATR': atr,
-      'ADX': adx,
-      'volumen': vol,
-      'Hurst': hurst,
-      'Pendiente_Reg': slope,
-      'R2_Tendencia': r2,
-      'CRT_Valida': crt,
-      'CVD': cvd,
-      'Delta_Volumen': delta_vol,
-      'prob_subida_predicha': prob_subida,
-      'precio_futuro': np.nan,
-      'exito_real': np.nan,
-  }])
+def registrar_prediccion(simbolo, precio, rsi, atr, adx, vol, hurst, slope, r2, crt, cvd, delta_vol, prob_subida):
+    nueva_fila = pd.DataFrame([{
+        'timestamp': datetime.now(timezone.utc).isoformat(), 'simbolo': simbolo, 'precio_entrada': precio,
+        'RSI': rsi, 'ATR': atr, 'ADX': adx, 'volumen': vol,
+        'Hurst': hurst, 'Pendiente_Reg': slope, 'R2_Tendencia': r2, 'CRT_Valida': crt,
+        'CVD': cvd, 'Delta_Volumen': delta_vol,
+        'prob_subida_predicha': prob_subida, 'precio_futuro': np.nan, 'exito_real': np.nan
+    }])
+    
+    if not os.path.exists(ARCHIVO_MEMORIA) or os.path.getsize(ARCHIVO_MEMORIA) == 0:
+        nueva_fila.to_csv(ARCHIVO_MEMORIA, index=False)
+        return
 
-  if not os.path.exists(ARCHIVO_MEMORIA) or os.path.getsize(ARCHIVO_MEMORIA) == 0:
-    nueva_fila.to_csv(ARCHIVO_MEMORIA, index=False)
-    return
+    try:
+        df_mem = pd.read_csv(ARCHIVO_MEMORIA)
+        if df_mem.empty:
+            nueva_fila.to_csv(ARCHIVO_MEMORIA, index=False)
+            return
 
-  try:
-    df_mem = pd.read_csv(ARCHIVO_MEMORIA)
-    if df_mem.empty:
-      nueva_fila.to_csv(ARCHIVO_MEMORIA, index=False)
-      return
+        df_mem['timestamp_dt'] = pd.to_datetime(df_mem['timestamp'])
+        ahora_utc = datetime.now(timezone.utc)
+        
+        simbolo_reciente = df_mem[
+            (df_mem['simbolo'] == simbolo) & 
+            ((ahora_utc - df_mem['timestamp_dt']).dt.total_seconds() < 12 * 3600)
+        ]
 
-    df_mem['timestamp_dt'] = pd.to_datetime(df_mem['timestamp'])
-    ahora_utc = datetime.now(timezone.utc)
-
-    simbolo_reciente = df_mem[
-        (df_mem['simbolo'] == simbolo)
-        & ((ahora_utc - df_mem['timestamp_dt']).dt.total_seconds() < 12 * 3600)
-    ]
-
-    if simbolo_reciente.empty:
-      nueva_fila.to_csv(ARCHIVO_MEMORIA, mode='a', header=False, index=False)
-  except Exception:
-    nueva_fila.to_csv(ARCHIVO_MEMORIA, mode='a', header=False, index=False)
-
+        if simbolo_reciente.empty:
+            nueva_fila.to_csv(ARCHIVO_MEMORIA, mode='a', header=False, index=False)
+    except Exception:
+        nueva_fila.to_csv(ARCHIVO_MEMORIA, mode='a', header=False, index=False)
 
 def auditar_memoria(exchange, horizonte_dias=HORIZONTE_VALIDACION):
-  if not os.path.exists(ARCHIVO_MEMORIA):
-    return
-  try:
-    if os.path.getsize(ARCHIVO_MEMORIA) == 0:
-      return
-    df_memoria = pd.read_csv(ARCHIVO_MEMORIA)
-    if df_memoria.empty:
-      return
-  except Exception:
-    return
+    if not os.path.exists(ARCHIVO_MEMORIA): return
+    try:
+        if os.path.getsize(ARCHIVO_MEMORIA) == 0: return
+        df_memoria = pd.read_csv(ARCHIVO_MEMORIA)
+        if df_memoria.empty: return
+    except Exception: return
 
-  df_memoria['timestamp'] = pd.to_datetime(df_memoria['timestamp'])
-  ahora = datetime.now(timezone.utc)
-  pendientes = df_memoria[df_memoria['exito_real'].isna()]
-  cambios = False
-  for idx, fila in pendientes.iterrows():
-    delta_dias = (ahora - fila['timestamp']).days
-    if delta_dias >= horizonte_dias:
-      try:
-        fecha_objetivo = fila['timestamp'] + pd.Timedelta(
-            days=horizonte_dias
-        )
-        since_ms = int(fecha_objetivo.timestamp() * 1000)
-        velas = exchange.fetch_ohlcv(
-            fila['simbolo'], timeframe='1d', since=since_ms, limit=2
-        )
-        if velas:
-          precio_futuro = velas[0][4]
-          df_memoria.at[idx, 'precio_futuro'] = precio_futuro
-          df_memoria.at[idx, 'exito_real'] = (
-              1 if precio_futuro > fila['precio_entrada'] else 0
-          )
-          cambios = True
-        time.sleep(0.2)
-      except Exception:
-        pass
-  if cambios:
-    df_memoria.to_csv(ARCHIVO_MEMORIA, index=False)
-
+    df_memoria['timestamp'] = pd.to_datetime(df_memoria['timestamp'])
+    ahora = datetime.now(timezone.utc)
+    pendientes = df_memoria[df_memoria['exito_real'].isna()]
+    cambios = False
+    for idx, fila in pendientes.iterrows():
+        delta_dias = (ahora - fila['timestamp']).days
+        if delta_dias >= horizonte_dias:
+            try:
+                fecha_objetivo = fila['timestamp'] + pd.Timedelta(days=horizonte_dias)
+                since_ms = int(fecha_objetivo.timestamp() * 1000)
+                velas = exchange.fetch_ohlcv(fila['simbolo'], timeframe='1d', since=since_ms, limit=2)
+                if velas:
+                    precio_futuro = velas[0][4]
+                    df_memoria.at[idx, 'precio_futuro'] = precio_futuro
+                    df_memoria.at[idx, 'exito_real'] = 1 if precio_futuro > fila['precio_entrada'] else 0
+                    cambios = True
+                time.sleep(0.2)
+            except Exception: pass
+    if cambios:
+        df_memoria.to_csv(ARCHIVO_MEMORIA, index=False)
 
 def calcular_riesgo_dinamico(riesgo_base=0.01):
-  if not os.path.exists(ARCHIVO_MEMORIA):
-    return riesgo_base, 'SIN DATOS'
-  try:
-    if os.path.getsize(ARCHIVO_MEMORIA) == 0:
-      return riesgo_base, 'SIN DATOS'
-    df_mem = pd.read_csv(ARCHIVO_MEMORIA)
-    if df_mem.empty:
-      return riesgo_base, 'SIN DATOS'
-  except Exception:
-    return riesgo_base, 'SIN DATOS'
+    if not os.path.exists(ARCHIVO_MEMORIA): return riesgo_base, "SIN DATOS"
+    try:
+        if os.path.getsize(ARCHIVO_MEMORIA) == 0: return riesgo_base, "SIN DATOS"
+        df_mem = pd.read_csv(ARCHIVO_MEMORIA)
+        if df_mem.empty: return riesgo_base, "SIN DATOS"
+    except Exception: return riesgo_base, "SIN DATOS"
 
-  auditadas = df_mem.dropna(subset=['exito_real'])
-  if len(auditadas) < MIN_CASOS_RIESGO_DINAMICO:
-    return (
-        riesgo_base,
-        f'RECOPILANDO ({len(auditadas)}/{MIN_CASOS_RIESGO_DINAMICO})',
-    )
-  win_rate_reciente = auditadas.tail(MIN_CASOS_RIESGO_DINAMICO)[
-      'exito_real'
-  ].mean()
-  if win_rate_reciente < 0.40:
-    return riesgo_base * 0.5, f'PERDEDORA ({win_rate_reciente*100:.0f}%)'
-  elif win_rate_reciente > 0.60:
-    return riesgo_base * 1.5, f'GANADORA ({win_rate_reciente*100:.0f}%)'
-  return riesgo_base, f'ESTABLE ({win_rate_reciente*100:.0f}%)'
-
+    auditadas = df_mem.dropna(subset=['exito_real'])
+    if len(auditadas) < MIN_CASOS_RIESGO_DINAMICO:
+        return riesgo_base, f"RECOPILANDO ({len(auditadas)}/{MIN_CASOS_RIESGO_DINAMICO})"
+    win_rate_reciente = auditadas.tail(MIN_CASOS_RIESGO_DINAMICO)['exito_real'].mean()
+    if win_rate_reciente < 0.40:
+        return riesgo_base * 0.5, f"PERDEDORA ({win_rate_reciente*100:.0f}%)"
+    elif win_rate_reciente > 0.60:
+        return riesgo_base * 1.5, f"GANADORA ({win_rate_reciente*100:.0f}%)"
+    return riesgo_base, f"ESTABLE ({win_rate_reciente*100:.0f}%)"
 
 def detectar_regimen_kmeans(df_btc):
-  if len(df_btc) < 100:
-    return 'DESCONOCIDO'
-  try:
-    data = pd.DataFrame(index=df_btc.index)
-    data['rendimiento'] = df_btc['cierre'].pct_change()
-    data['volatilidad'] = df_btc['maximo'] - df_btc['minimo']
-    data['tendencia'] = (
-        df_btc['cierre'] / df_btc['cierre'].rolling(50).mean() - 1
-    )
-    data = data.dropna()
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(data)
-    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
-    data['cluster'] = kmeans.fit_predict(X_scaled)
-    medias = data.groupby('cluster')['tendencia'].mean().sort_values()
-    mapa_regimenes = {
-        medias.index[0]: 'BAJISTA',
-        medias.index[1]: 'LATERAL',
-        medias.index[2]: 'ALCISTA',
-    }
-    return mapa_regimenes[data['cluster'].iloc[-1]]
-  except Exception:
-    return 'LATERAL'
-
+    if len(df_btc) < 100: return "DESCONOCIDO"
+    try:
+        data = pd.DataFrame(index=df_btc.index)
+        data['rendimiento'] = df_btc['cierre'].pct_change()
+        data['volatilidad'] = df_btc['maximo'] - df_btc['minimo']
+        data['tendencia'] = df_btc['cierre'] / df_btc['cierre'].rolling(50).mean() - 1
+        data = data.dropna()
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(data)
+        kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+        data['cluster'] = kmeans.fit_predict(X_scaled)
+        medias = data.groupby('cluster')['tendencia'].mean().sort_values()
+        mapa_regimenes = {medias.index[0]: 'BAJISTA', medias.index[1]: 'LATERAL', medias.index[2]: 'ALCISTA'}
+        return mapa_regimenes[data['cluster'].iloc[-1]]
+    except Exception: return "LATERAL"
 
 def inferir_probabilidad_xgboost(df, simbolo_actual):
-  try:
-    df_ml = df.copy()
-    df_ml['retorno_futuro'] = (
-        df_ml['cierre'].shift(-HORIZONTE_VALIDACION) / df_ml['cierre'] - 1
-    )
-    df_ml['exito'] = (df_ml['retorno_futuro'] > 0).astype(int)
+    try:
+        df_ml = df.copy()
+        df_ml['retorno_futuro'] = df_ml['cierre'].shift(-HORIZONTE_VALIDACION) / df_ml['cierre'] - 1
+        df_ml['exito'] = (df_ml['retorno_futuro'] > 0).astype(int)
 
-    features = [
-        'RSI',
-        'ATR',
-        'ADX',
-        'volumen',
-        'Hurst',
-        'Pendiente_Reg',
-        'R2_Tendencia',
-        'CRT_Valida',
-        'CVD',
-        'Delta_Volumen',
-    ]
-    df_ml = df_ml.dropna(subset=features)
+        features = ['RSI', 'ATR', 'ADX', 'volumen', 'Hurst', 'Pendiente_Reg', 'R2_Tendencia', 'CRT_Valida', 'CVD', 'Delta_Volumen']
+        df_ml = df_ml.dropna(subset=features)
 
-    X = df_ml[:-HORIZONTE_VALIDACION][features]
-    y = df_ml[:-HORIZONTE_VALIDACION]['exito']
+        X = df_ml[:-HORIZONTE_VALIDACION][features]
+        y = df_ml[:-HORIZONTE_VALIDACION]['exito']
 
-    if os.path.exists(ARCHIVO_MEMORIA):
-      try:
-        if os.path.getsize(ARCHIVO_MEMORIA) > 0:
-          df_mem = pd.read_csv(ARCHIVO_MEMORIA)
-          df_mem = df_mem[
-              (df_mem['simbolo'] == simbolo_actual)
-              & (df_mem['exito_real'].notna())
-          ]
-          if not df_mem.empty and all(f in df_mem.columns for f in features):
-            X_memoria = df_mem[features]
-            y_memoria = df_mem['exito_real']
-            X = pd.concat([X, X_memoria], ignore_index=True)
-            y = pd.concat([y, y_memoria], ignore_index=True)
-      except Exception:
-        pass
+        if os.path.exists(ARCHIVO_MEMORIA):
+            try:
+                if os.path.getsize(ARCHIVO_MEMORIA) > 0:
+                    df_mem = pd.read_csv(ARCHIVO_MEMORIA)
+                    df_mem = df_mem[(df_mem['simbolo'] == simbolo_actual) & (df_mem['exito_real'].notna())]
+                    if not df_mem.empty and all(f in df_mem.columns for f in features):
+                        X_memoria = df_mem[features]
+                        y_memoria = df_mem['exito_real']
+                        X = pd.concat([X, X_memoria], ignore_index=True)
+                        y = pd.concat([y, y_memoria], ignore_index=True)
+            except Exception: pass
 
-    if len(X) < 40 or y.nunique() < 2:
-      return None, None
+        if len(X) < 40 or y.nunique() < 2: return None, None
 
-    xgb_model = XGBClassifier(
-        n_estimators=100,
-        max_depth=3,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=42,
-        eval_metric='logloss',
-    )
-    xgb_model.fit(X, y)
+        xgb_model = XGBClassifier(
+            n_estimators=100, max_depth=3, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8, random_state=42,
+            eval_metric='logloss'
+        )
+        xgb_model.fit(X, y)
 
-    X_actual = df_ml.iloc[-1:][features]
-    probabilidades = xgb_model.predict_proba(X_actual)[0]
-    return probabilidades[1] * 100, probabilidades[0] * 100
-  except Exception:
-    return None, None
+        X_actual = df_ml.iloc[-1:][features]
+        probabilidades = xgb_model.predict_proba(X_actual)[0]
+        return probabilidades[1] * 100, probabilidades[0] * 100
+    except Exception: return None, None
 
 
 # ==========================================================================
 # 4. TELEGRAM (TEXTO PLANO Y FRAGMENTADO)
 # ==========================================================================
 def enviar_alerta_telegram(mensaje):
-  if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    print(
-        '❌ ERROR: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID no están definidos en el'
-        ' entorno.'
-    )
-    return
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ ERROR: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID no están definidos en el entorno.")
+        return
+    
+    mensaje_plano = mensaje.replace('*', '').replace('`', '')
+    max_length = 4000
+    mensajes = [mensaje_plano[i:i+max_length] for i in range(0, len(mensaje_plano), max_length)]
+    
+    for idx, msg_chunk in enumerate(mensajes):
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg_chunk}
+            response = requests.post(url, json=payload, timeout=15)
+            time.sleep(0.5)
+        except Exception as e: print(f"❌ EXCEPCIÓN al conectar con Telegram (Parte {idx+1}): {e}")
 
-  mensaje_plano = mensaje.replace('*', '').replace('`', '')
-  max_length = 4000
-  mensajes = [
-      mensaje_plano[i : i + max_length]
-      for i in range(0, len(mensaje_plano), max_length)
-  ]
+def cargar_estado():
+    if os.path.exists(ESTADO_PATH):
+        try:
+            with open(ESTADO_PATH, 'r') as f: return json.load(f)
+        except Exception: pass
+    return {}
 
-  for idx, msg_chunk in enumerate(mensajes):
+def guardar_estado(estado):
+    with open(ESTADO_PATH, 'w') as f: json.dump(estado, f, indent=2)
+
+
+# ==========================================================================
+# 5. ANÁLISIS DE ACTIVOS LARGO PLAZO
+# ==========================================================================
+def analizar_activo_largo_plazo(exchange, simbolo, temporalidad, descuento_pct, rsi_compra, rsi_venta, sobreprecio_pct, riesgo_aplicado, tipo_estrategia="REVERSION"):
+    velas = descargar_velas_cerradas(exchange, simbolo, temporalidad, VELAS_ANALISIS)
+    if not velas or len(velas) < 60: return None
+
+    df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+    df = calcular_cvd(df)
+    
+    df['RSI'] = calcular_rsi(df['cierre'], 14)
+    df['VWMA_30'] = calcular_vwma(df, 30)
+    df['ATR'] = calcular_atr(df, 14)
+    df['ADX'] = calcular_adx(df, 14)
+    df['Hurst'] = calcular_hurst_vectorizado(df['cierre'])
+    slopes, r2s = calcular_regresion_rolling(df['cierre'])
+    df['Pendiente_Reg'] = slopes
+    df['R2_Tendencia'] = r2s
+
+    rango_velas = df['maximo'] - df['minimo']
+    df['CRT'] = np.where(rango_velas == 0, 0, (df['cierre'] - df['apertura']).abs() / rango_velas)
+    df['CRT_Valida'] = (df['CRT'] >= 0.70).astype(int)
+
+    df = df.dropna().reset_index(drop=True)
+    if len(df) == 0: return None
+
+    ultima = df.iloc[-1]
+    precio, rsi, vwma_30, atr = ultima['cierre'], ultima['RSI'], ultima['VWMA_30'], ultima['ATR']
+    trailing_stop = precio - (atr * 2.5)
+    prefijo = "(Alta Volatilidad): " if tipo_estrategia == "MOMENTUM" else ""
+
+    if tipo_estrategia == "REVERSION":
+        condicion_descuento = (df['cierre'] <= df['VWMA_30'] * (1 - descuento_pct)) | (df['RSI'] < rsi_compra)
+        condicion_sobrecompra = df['RSI'] >= rsi_venta
+        if precio <= (vwma_30 * (1 - descuento_pct)) or rsi < rsi_compra:
+            accion, etiqueta, validacion = "COMPRAR", f"{prefijo}🟢 COMPRAR: Activo en descuento bajo VWMA.", validar_senal_historica(df, condicion_descuento.values)
+        elif rsi >= rsi_venta:
+            accion, etiqueta, validacion = "EVALUAR_VENTA", f"{prefijo}🟡 TOMAR BENEFICIOS: Euforia extrema.", validar_senal_historica(df, condicion_sobrecompra.values)
+        elif precio > (vwma_30 * (1 + sobreprecio_pct)):
+            accion, etiqueta, validacion = "ESPERAR", f"{prefijo}🔴 ESPERAR: Precio inflado sobre volumen.", None
+        else:
+            accion, etiqueta, validacion = "NEUTRO", f"{prefijo}⚪ ZONA NEUTRA: Mercado estable.", None
+
+    elif tipo_estrategia == "MOMENTUM":
+        condicion_momentum = (df['cierre'] > df['VWMA_30']) & (df['RSI'] > 55) & (df['RSI'] < 75)
+        condicion_caida = (df['RSI'] >= 80) | (df['cierre'] < df['VWMA_30'] * 0.95)
+        if precio > vwma_30 and 55 < rsi < 75:
+            accion, etiqueta, validacion = "COMPRAR", f"🔥 COMPRAR (MOMENTUM): Tendencia fuerte sobre VWMA.", validar_senal_historica(df, condicion_momentum.values)
+        elif rsi >= 80 or precio < (vwma_30 * 0.95):
+            accion, etiqueta, validacion = "EVALUAR_VENTA", f"🟡 CORTAR / BENEFICIOS: Tendencia agotada.", validar_senal_historica(df, condicion_caida.values)
+        else:
+            accion, etiqueta, validacion = "NEUTRO", f"⚪ ZONA NEUTRA: Sin fuerza direccional.", None
+
+    denominador_atr = max(atr * 2.5, 0.0001)
+    sugerencia_tamano = CAPITAL_REFERENCIA_USD * riesgo_aplicado / denominador_atr
+    prob_subida, prob_bajada = inferir_probabilidad_xgboost(df, simbolo)
+    tiempo_est, precio_meta, var_pct = proyectar_meta_temporal(df, temporalidad)
+    
+    dia_pico, rec_hold = estimar_pico_confluencia(df, HORIZONTE_VALIDACION)
+
+    return {
+        'simbolo': simbolo, 'precio': precio, 'rsi': rsi, 'vwma_30': vwma_30,
+        'accion': accion, 'etiqueta': etiqueta, 'validacion': validacion,
+        'sugerencia_tamano': sugerencia_tamano, 'atr': atr, 'trailing_stop': trailing_stop,
+        'prob_subida': prob_subida, 'prob_bajada': prob_bajada,
+        'tiempo_est': tiempo_est, 'precio_meta': precio_meta, 'var_pct': var_pct,
+        'dia_pico': dia_pico, 'rec_hold': rec_hold
+    }
+
+
+# ==========================================================================
+# 6. BOT MAESTRO
+# ==========================================================================
+def ejecutar_bot_maestro():
+    exchange = ccxt.kucoin({'enableRateLimit': True, 'timeout': 30000})
+    exchange.load_markets()
+
+    auditar_memoria(exchange)
+    riesgo_dinamico, estado_racha = calcular_riesgo_dinamico(RIESGO_POR_TRADE)
+
+    estado_anterior, estado_nuevo = cargar_estado(), {}
+    alertas_nucleo, alertas_crecimiento, alertas_seguimiento, alertas_alto_riesgo, alertas_satelite = [], [], [], [], []
+
+    velas_btc = descargar_velas_cerradas(exchange, 'BTC/USDT', TEMPORALIDAD_ESCUDO, VELAS_ESCUDO_BTC)
+    velas_eth = descargar_velas_cerradas(exchange, 'ETH/USDT', TEMPORALIDAD_ESCUDO, 60)
+
+    regimen_macro = "DESCONOCIDO"
+    altseason_estado = "DESCONOCIDO"
+
+    if velas_btc:
+        df_btc = pd.DataFrame(velas_btc, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+        regimen_macro = detectar_regimen_kmeans(df_btc)
+        if velas_eth:
+            df_eth = pd.DataFrame(velas_eth, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+            if len(df_btc) > 30 and len(df_eth) > 30:
+                rend_btc = (df_btc['cierre'].iloc[-1] / df_btc['cierre'].iloc[-30]) - 1
+                rend_eth = (df_eth['cierre'].iloc[-1] / df_eth['cierre'].iloc[-30]) - 1
+                altseason_estado = "🟢 ON (Rotación a Alts)" if rend_eth > rend_btc else "🔴 OFF (Dominancia BTC)"
+
+    for s in NUCLEO_CONSERVADOR:
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_NUCLEO, 0.04, 40, 75, 0.05, riesgo_dinamico, "REVERSION"):
+            alertas_nucleo.append(r)
+            estado_nuevo[s] = r['accion']
+        time.sleep(0.3)
+
+    for s in NIVEL_CRECIMIENTO:
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_CRECIMIENTO, 0.07, 35, 80, 0.08, riesgo_dinamico, "REVERSION"):
+            alertas_crecimiento.append(r)
+            estado_nuevo[s] = r['accion']
+        time.sleep(0.3)
+
+    for s in SEGUIMIENTO_ESTRATEGICO:
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_SEGUIMIENTO, 0.06, 35, 78, 0.07, riesgo_dinamico, "REVERSION"):
+            alertas_seguimiento.append(r)
+            estado_nuevo[s] = r['accion']
+        time.sleep(0.3)
+
+    for s in ALTO_RIESGO:
+        if r := analizar_activo_largo_plazo(exchange, s, TEMPORALIDAD_ALTO_RIESGO, 0.08, 30, 80, 0.10, riesgo_dinamico, "MOMENTUM"):
+            alertas_alto_riesgo.append(r)
+            estado_nuevo[s] = r['accion']
+        time.sleep(0.3)
+
     try:
-      url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
-      payload = {
-          'chat_id': TELEGRAM_CHAT_ID,
-          'text': msg_chunk,
-          'parse_mode': '',
-      }
-      response = requests.post(url, json=payload)
-      if response.status_code == 200:
-        print(f'📱 Parte {idx+1} enviada con éxito a Telegram.')
-      else:
-        print(f'❌ Error Telegram HTTP {response.status_code}: {response.text}')
-    except Exception as e:
-      print(f'❌ Excepción al enviar alerta a Telegram: {e}')
+        tickers = exchange.fetch_tickers()
+        excluidos = set(NUCLEO_CONSERVADOR) | set(NIVEL_CRECIMIENTO) | set(SEGUIMIENTO_ESTRATEGICO) | set(ALTO_RIESGO)
+        candidatas = sorted([s for s, t in tickers.items() if '/USDT' in s and s not in excluidos and es_mercado_spot_valido(exchange, s) and t.get('quoteVolume', 0) > 1500000], key=lambda s: tickers[s].get('quoteVolume', 0), reverse=True)[:15]
 
+        historico_candidatas_aceptadas = {}
 
-# ==========================================================================
-# 5. MOTOR PRINCIPAL DE EJECUCIÓN (ESCENARIO Y PORTAFOLIO)
-# ==========================================================================
-def ejecutar_bot_cripto():
-  print('🚀 INICIANDO ANÁLISIS CUANTITATIVO DE CRIPTOMONEDAS...')
-  exchange = ccxt.binance({
-      'enableRateLimit': True,
-      'options': {'defaultType': 'spot'},
-  })
-  exchange.load_markets()
+        for s in candidatas:
+            velas = descargar_velas_cerradas(exchange, s, TEMPORALIDAD_SATELITE, VELAS_ANALISIS)
+            if not velas or len(velas) < 60:
+                continue
 
-  auditar_memoria(exchange)
-  riesgo_actual, estado_riesgo = calcular_riesgo_dinamico(RIESGO_POR_TRADE)
+            df = pd.DataFrame(velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+            df = calcular_cvd(df)
 
-  # Descargar escudo BTC
-  velas_btc = descargar_velas_cerradas(
-      exchange, 'BTC/USDT', TEMPORALIDAD_ESCUDO, VELAS_ESCUDO_BTC
-  )
-  regimen_btc = 'LATERAL'
-  if velas_btc:
-    df_btc = pd.DataFrame(
-        velas_btc, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen']
-    )
-    regimen_btc = detectar_regimen_kmeans(df_btc)
+            df['RSI'], _, df['BB_Lower'] = calcular_rsi(df['cierre'], 14), None, calcular_bollinger_bands(df['cierre'])[2]
+            df['VWMA_20'], df['ATR'], df['ADX'] = calcular_vwma(df, 20), calcular_atr(df, 14), calcular_adx(df, 14)
+            df['Max_20'] = df['cierre'].shift(1).rolling(20).max()
 
-  print(f'🛡️ Régimen de Mercado detectado (BTC): {regimen_btc}')
-  print(f'📊 Gestión de Riesgo Dinámica: {estado_riesgo}')
+            df['Hurst'] = calcular_hurst_vectorizado(df['cierre'])
+            slopes, r2s = calcular_regresion_rolling(df['cierre'])
+            df['Pendiente_Reg'] = slopes
+            df['R2_Tendencia'] = r2s
 
-  portafolios = [
-      ('NÚCLEO CONSERVADOR', NUCLEO_CONSERVADOR, TEMPORALIDAD_NUCLEO),
-      ('CRECIMIENTO', NIVEL_CRECIMIENTO, TEMPORALIDAD_CRECIMIENTO),
-      ('SEGUIMIENTO ESTRATÉGICO', SEGUIMIENTO_ESTRATEGICO, TEMPORALIDAD_SEGUIMIENTO),
-      ('ALTO RIESGO', ALTO_RIESGO, TEMPORALIDAD_ALTO_RIESGO),
-  ]
+            rango_velas = df['maximo'] - df['minimo']
+            df['CRT'] = np.where(rango_velas == 0, 0, (df['cierre'] - df['apertura']).abs() / rango_velas)
+            df['CRT_Valida'] = (df['CRT'] >= 0.70).astype(int)
 
-  reporte_general = f'🤖 *REPORTE CUANTITATIVO CRIPTO*\n• Régimen BTC: `{regimen_btc}`\n• Riesgo Dinámico: `{riesgo_actual*100:.2f}%%`\n\n'
+            df = df.dropna().reset_index(drop=True)
+            if len(df) == 0:
+                continue
+            ultima = df.iloc[-1]
 
-  for nombre_grupo, lista_simbolos, temporalidad in portafolios:
-    reporte_general += f'📂 *--- {nombre_grupo} ---*\n'
-    for simbolo in lista_simbolos:
-      if not es_mercado_spot_valido(exchange, simbolo):
-        continue
+            patron_smc, hist_alc_smc, hist_baj_smc = detectar_patrones_smc_historico(df)
 
-      velas = descargar_velas_cerradas(exchange, simbolo, temporalidad, VELAS_ANALISIS)
-      if not velas or len(velas) < 200:
-        continue
+            if regimen_macro == "BAJISTA":
+                cuantitativo_ok, breakout_ok, patron_smc = False, False, None
+            elif regimen_macro == "LATERAL":
+                cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['cierre'] < ultima['VWMA_20'])
+                breakout_ok = False
+            else:
+                cuantitativo_ok = (ultima['RSI'] <= SATELITE_RSI_ENTRADA and ultima['cierre'] <= ultima['BB_Lower'] * 1.01 and ultima['ADX'] < SATELITE_ADX_MAX)
+                breakout_ok = (ultima['cierre'] > ultima['Max_20']) and (ultima['cierre'] > ultima['VWMA_20']) and (ultima['ADX'] > 25) and ultima['CRT_Valida'] == 1
 
-      df = pd.DataFrame(
-          velas, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen']
-      )
-      df['RSI'] = calcular_rsi(df['cierre'])
-      df['ATR'] = calcular_atr(df)
-      df['ADX'] = calcular_adx(df)
-      df = calcular_cvd(df)
-      df['Hurst'] = calcular_hurst_vectorizado(df['cierre'])
-      slope, r2 = calcular_regresion_rolling(df['cierre'])
-      df['Pendiente_Reg'] = slope
-      df['R2_Tendencia'] = r2
+            if cuantitativo_ok or breakout_ok or patron_smc:
+                zonas_institucionales = detectar_zonas_rechazo_kmeans(df, n_clusters=5)
+                distancia_a_zona = min([abs(ultima['cierre'] - z) / ultima['cierre'] for z in zonas_institucionales])
+                en_zona_fuerte = distancia_a_zona <= 0.025
 
-      _, sa, sb = detectar_patrones_smc_historico(df)
-      df['CRT_Valida'] = sa | sb
+                velas_1h = descargar_velas_cerradas(exchange, s, '1h', 60)
+                confluencia_1h_ok = False
+                if velas_1h:
+                    df_1h = pd.DataFrame(velas_1h, columns=['timestamp', 'apertura', 'maximo', 'minimo', 'cierre', 'volumen'])
+                    rsi_1h = calcular_rsi(df_1h['cierre'], 14).iloc[-1]
+                    vwma_1h = calcular_vwma(df_1h, 20).iloc[-1]
+                    cierre_1h = df_1h['cierre'].iloc[-1]
 
-      df = df.dropna()
-      if len(df) < 50:
-        continue
+                    es_alcista = cuantitativo_ok or breakout_ok or (patron_smc and patron_smc['tipo'] == "SMC_ALCISTA")
+                    if es_alcista:
+                        if rsi_1h < 75 and cierre_1h >= (vwma_1h * 0.99): confluencia_1h_ok = True
+                    else:
+                        if rsi_1h > 25 and cierre_1h <= (vwma_1h * 1.01): confluencia_1h_ok = True
+                
+                if not en_zona_fuerte or not confluencia_1h_ok: continue
 
-      ultima = df.iloc[-1]
-      precio = ultima['cierre']
-      rsi = ultima['RSI']
-      atr = ultima['ATR']
-      adx = ultima['ADX']
-      hurst = ultima['Hurst']
-      slope = ultima['Pendiente_Reg']
-      r2 = ultima['R2_Tendencia']
-      crt = 1 if ultima['CRT_Valida'] else 0
-      cvd = ultima['CVD']
-      delta_vol = ultima['Delta_Volumen']
+                correlacion_peligrosa = False
+                retornos_actuales = df['cierre'].tail(50).pct_change().dropna().values
+                for s_aceptado, retornos_aceptados in historico_candidatas_aceptadas.items():
+                    if len(retornos_actuales) == len(retornos_aceptados):
+                        corr = np.corrcoef(retornos_actuales, retornos_aceptados)[0, 1]
+                        if not np.isnan(corr) and corr > 0.85:
+                            correlacion_peligrosa = True
+                            break
+                if correlacion_peligrosa: continue
 
-      prob_subida, prob_bajada = inferir_probabilidad_xgboost(df, simbolo)
-      tiempo_hold, recomendacion_hold = estimar_pico_confluencia(df)
+                historico_candidatas_aceptadas[s] = retornos_actuales
+                prob_subida, prob_bajada = inferir_probabilidad_xgboost(df, s)
+                tiempo_est, precio_meta, var_pct = proyectar_meta_temporal(df, TEMPORALIDAD_SATELITE)
+                dia_pico, rec_hold = estimar_pico_confluencia(df, HORIZONTE_VALIDACION)
 
-      # Registrar predicción para autoaprendizaje
-      if prob_subida is not None:
-        registrar_prediccion(
-            simbolo,
-            precio,
-            rsi,
-            atr,
-            adx,
-            ultima['volumen'],
-            hurst,
-            slope,
-            r2,
-            crt,
-            cvd,
-            delta_vol,
-            prob_subida,
-        )
+                if cuantitativo_ok:
+                    tipo_al = 'CUANTITATIVO_REVERSION'
+                    sl, tp = ultima['cierre'] - (SATELITE_ATR_SL_MULT * ultima['ATR']), ultima['cierre'] + (SATELITE_ATR_TP_MULT * ultima['ATR'])
+                    val = validar_senal_historica(df, (df['RSI'] <= SATELITE_RSI_ENTRADA) & (df['cierre'] <= df['BB_Lower'] * 1.01))
+                elif breakout_ok:
+                    tipo_al = 'BREAKOUT_MOMENTUM_CRT'
+                    sl, tp = ultima['cierre'] - (1.5 * ultima['ATR']), ultima['cierre'] + (3.0 * ultima['ATR'])
+                    val = validar_senal_historica(df, (df['cierre'] > df['cierre'].shift(1).rolling(20).max()) & (df['cierre'] > ultima['VWMA_20']))
+                else:
+                    tipo_al = patron_smc['tipo']
+                    sl, tp = patron_smc['sl'], patron_smc['tp']
+                    condicion_smc = hist_alc_smc if patron_smc['tipo'] == "SMC_ALCISTA" else hist_baj_smc
+                    val = validar_senal_historica(df, condicion_smc)
 
-      estado_prob = f'{prob_subida:.1f}%' if prob_subida is not None else 'Calculando...'
-      reporte_general += f'• `{simbolo}` | Precio: `{precio}` | RSI: `{rsi:.1f}` | Prob. IA: `{estado_prob}` | {recomendacion_hold}\n'
+                riesgo_matematico = calcular_kelly_fraccional(prob_subida, tp, sl, ultima['cierre'])
+                
+                if riesgo_matematico <= 0:
+                    continue
 
-    reporte_general += '\n'
+                sugerencia_tamano_optimizada = CAPITAL_REFERENCIA_USD * riesgo_matematico / max(abs(ultima['cierre'] - sl), 0.0001)
 
-  enviar_alerta_telegram(reporte_general)
-  print('✅ Ciclo de criptomonedas ejecutado y reportado con éxito.')
+                if prob_subida is not None:
+                    registrar_prediccion(s, ultima['cierre'], ultima['RSI'], ultima['ATR'], ultima['ADX'], ultima['volumen'], ultima['Hurst'], ultima['Pendiente_Reg'], ultima['R2_Tendencia'], ultima['CRT_Valida'], ultima['CVD'], ultima['Delta_Volumen'], prob_subida)
+                
+                alertas_satelite.append({
+                    'simbolo': s, 'precio': ultima['cierre'], 'tipo_alerta': tipo_al, 'tp': tp, 'sl': sl, 
+                    'sugerencia_tamano': sugerencia_tamano_optimizada, 
+                    'validacion': val, 'prob_subida': prob_subida, 'prob_bajada': prob_bajada,
+                    'tiempo_est': tiempo_est, 'precio_meta': precio_meta, 'var_pct': var_pct,
+                    'dia_pico': dia_pico, 'rec_hold': rec_hold
+                })
+                estado_nuevo[s] = tipo_al
 
+            time.sleep(0.3)
+
+    except Exception as e: print(f"⚠️ Error procesando el bloque satélite: {e}")
+
+    # ==========================================================================
+    # ENVÍO INCONDICIONAL A TELEGRAM (TEXTO PLANO / SEGURO)
+    # ==========================================================================
+    todas_las_alertas_largo_plazo = alertas_nucleo + alertas_crecimiento + alertas_seguimiento + alertas_alto_riesgo
+
+    msj = f"🚨 REPORTE IA (INSTITUCIONAL) — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+    msj += f"🌐 Régimen Macro: {regimen_macro}\n"
+    msj += f"🔄 Flujo de Capital: {altseason_estado}\n"
+    msj += f"🧠 Racha IA: {estado_racha} | Riesgo base actual: {riesgo_dinamico*100:.2f}%\n\n"
+
+    if todas_las_alertas_largo_plazo:
+        msj += "📊 ESTADO GENERAL DEL PORTAFOLIO\n"
+        for o in todas_las_alertas_largo_plazo:
+            msj += f"• {o['simbolo']} | ${o['precio']:,.4f}\n  {o['etiqueta']}\n"
+            msj += f"  🛡️ Trailing Stop: ${o['trailing_stop']:,.4f}\n"
+            msj += f"  ⏳ Horizonte Estimado: {o['tiempo_est']} | Meta: ${o['precio_meta']:,.4f} (+{o['var_pct']:.1f}%)\n"
+            msj += f"  📅 Pico Estimado: Vela {o['dia_pico']} | 🧩 {o['rec_hold']}\n"
+            if o.get('prob_subida') is not None:
+                msj += f"  🤖 Probabilidad IA: 📈 {o['prob_subida']:.1f}% | 📉 {o['prob_bajada']:.1f}%\n"
+        msj += "\n"
+
+    if alertas_satelite:
+        msj += f"🎯 RADAR DE PRECISIÓN ({TEMPORALIDAD_SATELITE})\n"
+        for o in alertas_satelite:
+            emoji = '🟢' if 'ALCISTA' in o['tipo_alerta'] or 'REVERSION' in o['tipo_alerta'] or 'BREAKOUT' in o['tipo_alerta'] else '🔴'
+            msj += f"{emoji} {o['tipo_alerta'].replace('_', ' ')} | {o['simbolo']}\n  Entrada: ${o['precio']:,.4f}\n  🎯 TP: ${o['tp']:,.4f} | 🛑 SL: ${o['sl']:,.4f}\n"
+            msj += f"  ⏳ Horizonte Estimado: {o['tiempo_est']} | Meta: ${o['precio_meta']:,.4f} (+{o['var_pct']:.1f}%)\n"
+            msj += f"  📅 Pico Estimado: Vela {o['dia_pico']} | 🧩 {o['rec_hold']}\n"
+            msj += f"  🧩 Filtro Avanzado: 4H+1H Confluencia ✅ | Zona Institucional ✅\n"
+            msj += f"  ⚖️ Gestión (Kelly): Tamaño sugerido ${o['sugerencia_tamano']:,.2f}\n"
+            if o.get('prob_subida') is not None:
+                msj += f"  🤖 Probabilidad IA: 📈 {o['prob_subida']:.1f}% | 📉 {o['prob_bajada']:.1f}%\n"
+            if o['validacion'] and o['validacion']['suficiente']:
+                msj += f"  📊 Histórico (con comisiones): Win Rate {o['validacion']['win_rate']:.0f}%\n"
+            elif o['validacion'] and o['validacion']['n_casos'] > 0:
+                msj += f"  ⚠️ Solo {o['validacion']['n_casos']} casos históricos — poco confiable\n"
+        msj += "\n"
+    else:
+        msj += f"🎯 RADAR DE PRECISIÓN ({TEMPORALIDAD_SATELITE})\n  ⚪ Sin señales activas en este ciclo.\n\n"
+
+    msj += "⚠️ Herramienta cuantitativa. No constituye asesoría financiera personalizada."
+
+    enviar_alerta_telegram(msj)
+    guardar_estado(estado_nuevo)
 
 if __name__ == '__main__':
-  ejecutar_bot_cripto()
+    ejecutar_bot_maestro()
