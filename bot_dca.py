@@ -16,7 +16,7 @@ warnings.filterwarnings('ignore')
 # ==========================================================================
 # 1. CONFIGURACIÓN GENERAL DEL PORTAFOLIO (NARRATIVAS 2026)
 # ==========================================================================
-NUCLEO_CONSERVADOR = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'LINK/USDT']
+NUCLEO_CONSERVADOR = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'UNI/USDT']
 TEMPORALIDAD_NUCLEO = '1d'
 
 NIVEL_CRECIMIENTO = ['NEAR/USDT', 'TAO/USDT', 'SEI/USDT', 'ADA/USDT', 'AVAX/USDT', 'RENDER/USDT', 'FET/USDT', 'TIA/USDT', 'ARB/USDT']
